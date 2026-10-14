@@ -107,7 +107,7 @@ class ConnectionManager(
         _snapshot.value = Snapshot()
     }
 
-    suspend fun read(paneId: String, lines: Int = 300): PaneRead = requireClient().read(paneId, lines)
+    suspend fun read(paneId: String, lines: Int = 300): PaneRead = requireClient().read(paneId, lines, ansi = true)
 
     suspend fun submit(paneId: String, text: String) = requireClient().submit(paneId, text)
 

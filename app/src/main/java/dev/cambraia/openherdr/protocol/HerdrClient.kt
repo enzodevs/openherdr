@@ -49,8 +49,8 @@ class HerdrClient(
 
     suspend fun workspaces(): List<Workspace> = HerdrProtocol.workspaces(call("workspace.list"))
 
-    suspend fun read(paneId: String, lines: Int = 200): PaneRead =
-        HerdrProtocol.paneRead(call("pane.read", HerdrProtocol.readParams(paneId, lines)))
+    suspend fun read(paneId: String, lines: Int = 200, ansi: Boolean = false): PaneRead =
+        HerdrProtocol.paneRead(call("pane.read", HerdrProtocol.readParams(paneId, lines, ansi)))
 
     suspend fun sendText(paneId: String, text: String) {
         call("pane.send_text", HerdrProtocol.sendTextParams(paneId, text))

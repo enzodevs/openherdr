@@ -83,3 +83,13 @@ class HerdrProtocolTest {
         assertEquals(listOf(AgentStatus.Blocked, AgentStatus.Done, AgentStatus.Working, AgentStatus.Idle, AgentStatus.Unknown), sorted)
     }
 }
+
+class ReadParamsTest {
+    @Test
+    fun `ansi reads keep escape codes`() {
+        val ansi = HerdrProtocol.readParams("w1:p1", 50, ansi = true).toString()
+        assertEquals("""{"pane_id":"w1:p1","source":"recent","lines":50,"format":"ansi","strip_ansi":false}""", ansi)
+        val plain = HerdrProtocol.readParams("w1:p1", 50).toString()
+        assertEquals("""{"pane_id":"w1:p1","source":"recent","lines":50,"format":"text","strip_ansi":true}""", plain)
+    }
+}

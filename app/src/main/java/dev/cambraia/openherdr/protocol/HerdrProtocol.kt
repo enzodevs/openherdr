@@ -82,11 +82,13 @@ object HerdrProtocol {
         })
     }
 
-    fun readParams(paneId: String, lines: Int): JsonObject = buildJsonObject {
+    /** With [ansi] the text keeps SGR color codes (see [Ansi]); otherwise it is plain. */
+    fun readParams(paneId: String, lines: Int, ansi: Boolean = false): JsonObject = buildJsonObject {
         put("pane_id", paneId)
         put("source", "recent")
         put("lines", lines)
-        put("strip_ansi", true)
+        put("format", if (ansi) "ansi" else "text")
+        put("strip_ansi", !ansi)
     }
 
     fun sendTextParams(paneId: String, text: String): JsonObject = buildJsonObject {

@@ -1,3 +1,17 @@
 <resources>
     <string name="app_name">OpenHerdr</string>
+    <string name="channel_alerts">Agent alerts</string>
+    <string name="channel_connection">Connection</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="alert_needs_input">%1$s needs your input</string>
+    <string name="alert_finished">%1$s finished</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_reconnecting">Reconnecting…</string>
+    <string name="status_attention">Needs your attention</string>
+    <string name="status_blocked">%1$d waiting</string>
+    <plurals name="status_agents">
+        <item quantity="one">%1$d agent</item>
+        <item quantity="other">%1$d agents</item>
+    </plurals>
+    <string name="fgs_subtype">Keeps the SSH connection to the user\'s own herdr server open to deliver agent status notifications.</string>
 </resources>
