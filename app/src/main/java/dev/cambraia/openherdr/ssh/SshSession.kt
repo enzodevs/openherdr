@@ -8,6 +8,8 @@ import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Session
 import dev.cambraia.openherdr.protocol.SocketStream
 import dev.cambraia.openherdr.data.HerdrLink
+import dev.cambraia.openherdr.transcript.RemoteFiles
+import com.jcraft.jsch.SftpException
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -40,7 +42,48 @@ sealed class SshFailure(message: String, cause: Throwable? = null) : Exception(m
 class SshSession private constructor(
     private val session: Session,
     val socketPath: String,
+    private val homeDir: String,
 ) : HerdrLink {
+
+    override val files: RemoteFiles = SftpFiles()
+
+    /** Read-only SFTP on one lazily opened channel; JSch channels are not thread-safe, hence the lock. */
+    private inner class SftpFiles : RemoteFiles {
+        private var channel: ChannelSftp? = null
+
+        override val home: String get() = homeDir
+
+        private fun <T> sftp(block: (ChannelSftp) -> T): T = synchronized(this) {
+            val open = channel?.takeIf { it.isConnected }
+                ?: (session.openChannel("sftp") as ChannelSftp).also { it.connect(CHANNEL_TIMEOUT_MS); channel = it }
+            block(open)
+        }
+
+        override fun size(path: String): Long? = try {
+            sftp { it.stat(path) }.takeIf { !it.isDir }?.size
+        } catch (e: SftpException) {
+            if (e.id == ChannelSftp.SSH_FX_NO_SUCH_FILE) null else throw e
+        }
+
+        override fun read(path: String, offset: Long, maxBytes: Int): ByteArray = sftp { sftp ->
+            sftp.get(path, null, offset).use { input ->
+                val buffer = ByteArray(maxBytes)
+                var total = 0
+                while (total < maxBytes) {
+                    val n = input.read(buffer, total, maxBytes - total)
+                    if (n < 0) break
+                    total += n
+                }
+                buffer.copyOf(total)
+            }
+        }
+
+        override fun list(dir: String): List<String> = try {
+            sftp { it.ls(dir) }.map { (it as ChannelSftp.LsEntry).filename }.filter { it != "." && it != ".." }.sorted()
+        } catch (e: SftpException) {
+            if (e.id == ChannelSftp.SSH_FX_NO_SUCH_FILE) emptyList() else throw e
+        }
+    }
 
     override val isConnected: Boolean
         get() = session.isConnected
@@ -89,7 +132,8 @@ class SshSession private constructor(
                 throw classify(e, target, hostKeys, pins)
             }
             return try {
-                SshSession(session, herdrSocketPath(homeDirectory(session), target.herdrSession))
+                val home = homeDirectory(session)
+                SshSession(session, herdrSocketPath(home, target.herdrSession), home)
             } catch (e: Exception) {
                 session.disconnect()
                 throw SshFailure.Unreachable(e)

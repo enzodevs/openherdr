@@ -8,6 +8,7 @@ import dev.cambraia.openherdr.protocol.StreamOpener
 import dev.cambraia.openherdr.protocol.Workspace
 import dev.cambraia.openherdr.ssh.PinStore
 import dev.cambraia.openherdr.ssh.SshFailure
+import dev.cambraia.openherdr.transcript.RemoteFiles
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -29,6 +30,9 @@ import java.io.IOException
 /** An authenticated transport to one herdr server. */
 interface HerdrLink : StreamOpener, Closeable {
     val isConnected: Boolean
+
+    /** Read-only file access on the host, used to show agent conversations; null when unsupported. */
+    val files: RemoteFiles? get() = null
 }
 
 /** Opens a [HerdrLink] for a profile. Blocking; throws [SshFailure]. */
@@ -85,6 +89,9 @@ class ConnectionManager(
 
     @Volatile
     private var client: HerdrClient? = null
+
+    @Volatile
+    private var link: HerdrLink? = null
     private var job: Job? = null
 
     fun connect(profile: ServerProfile) {
@@ -103,6 +110,7 @@ class ConnectionManager(
         job?.cancel()
         job = null
         client = null
+        link = null
         _connection.value = Connection.Idle
         _snapshot.value = Snapshot()
     }
@@ -112,6 +120,10 @@ class ConnectionManager(
     suspend fun submit(paneId: String, text: String) = requireClient().submit(paneId, text)
 
     suspend fun sendKeys(paneId: String, keys: List<String>) = requireClient().sendKeys(paneId, keys)
+
+    /** Files on the connected host, or null while disconnected. */
+    val files: RemoteFiles?
+        get() = link?.takeIf { client != null }?.files
 
     private fun requireClient(): HerdrClient = client ?: throw IOException("Not connected")
 
@@ -149,6 +161,7 @@ class ConnectionManager(
                 lost = e
             } finally {
                 client = null
+                this.link = null
                 withContext(NonCancellable + io) { runCatching { link.close() } }
             }
             attempt++
@@ -160,6 +173,7 @@ class ConnectionManager(
     private suspend fun session(profile: ServerProfile, link: HerdrLink) = coroutineScope {
         val herdr = HerdrClient(link, io)
         herdr.ping()
+        this@ConnectionManager.link = link
         client = herdr
         _connection.value = Connection.Connected(profile)
 

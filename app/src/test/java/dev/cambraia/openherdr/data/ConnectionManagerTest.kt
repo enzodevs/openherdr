@@ -89,7 +89,7 @@ class ConnectionManagerTest {
     val timeout: Timeout = Timeout.seconds(20)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val profile = ServerProfile(name = "pc", host = "10.13.13.1", user = "rrghost")
+    private val profile = ServerProfile(name = "pc", host = "10.0.0.2", user = "user")
     private val pin = HostKeyPin("ssh-ed25519", "AAAA")
     private val alerts = CopyOnWriteArrayList<AgentAlert>()
 
@@ -119,7 +119,7 @@ class ConnectionManagerTest {
         assertEquals(pin, needs.failure.pin)
 
         m.trust(needs)
-        assertEquals(pin, pins.get("10.13.13.1"))
+        assertEquals(pin, pins.get("10.0.0.2"))
         waitFor("connected", { m.connection.value }) { it is Connection.Connected }
         val snap = waitFor("loaded", { m.snapshot.value }) { it.loaded }
         assertEquals(listOf("w1:p1"), snap.agents.map { it.paneId })

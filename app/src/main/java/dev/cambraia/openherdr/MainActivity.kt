@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
+import android.graphics.Color
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
@@ -24,14 +26,23 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.cambraia.openherdr.data.Connection
 import dev.cambraia.openherdr.ui.AgentScreen
-import dev.cambraia.openherdr.ui.DashboardScreen
+import dev.cambraia.openherdr.ui.AgentsTab
+import dev.cambraia.openherdr.ui.HomeScreen
+import dev.cambraia.openherdr.ui.SettingsInfo
+import dev.cambraia.openherdr.ui.SettingsTab
+import dev.cambraia.openherdr.ui.Tab
+import dev.cambraia.openherdr.ui.TabBarClearance
+import dev.cambraia.openherdr.data.DeviceKey
+import dev.cambraia.openherdr.data.ServerProfile
+import dev.cambraia.openherdr.protocol.AgentStatus
+import dev.cambraia.openherdr.voice.SpeechModel
 import dev.cambraia.openherdr.ui.DeviceKeyInfo
 import dev.cambraia.openherdr.ui.DeviceKeyScreen
 import dev.cambraia.openherdr.ui.NavViewModel
 import dev.cambraia.openherdr.ui.OpenHerdrTheme
 import dev.cambraia.openherdr.ui.Screen
 import dev.cambraia.openherdr.ui.ServerEditorScreen
-import dev.cambraia.openherdr.ui.ServersScreen
+import dev.cambraia.openherdr.ui.ServersTab
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -41,7 +52,7 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
+        enableEdgeToEdge(SystemBarStyle.dark(Color.TRANSPARENT), SystemBarStyle.dark(Color.TRANSPARENT))
         super.onCreate(savedInstanceState)
         notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         handle(intent)
@@ -57,10 +68,7 @@ class MainActivity : ComponentActivity() {
     private fun handle(intent: Intent?) {
         val pane = intent?.getStringExtra(EXTRA_PANE_ID) ?: return
         intent.removeExtra(EXTRA_PANE_ID)
-        if (app.connections.connection.value != Connection.Idle) {
-            nav.push(Screen.Dashboard)
-            nav.showOverDashboard(Screen.Agent(pane))
-        }
+        if (app.connections.connection.value != Connection.Idle) nav.openAgent(pane)
     }
 
     companion object {
@@ -76,17 +84,12 @@ private fun Root(nav: NavViewModel) {
     val connection by app.connections.connection.collectAsStateWithLifecycle()
     val snapshot by app.connections.snapshot.collectAsStateWithLifecycle()
 
-    // Disconnected elsewhere (for example from the notification): leave the live screens.
+    // Disconnected elsewhere (for example from the notification): leave the agent screen.
     LaunchedEffect(connection) {
-        if (connection == Connection.Idle && (nav.current == Screen.Dashboard || nav.current is Screen.Agent)) {
-            nav.popTo(Screen.Servers)
-        }
+        if (connection == Connection.Idle && nav.current is Screen.Agent) nav.home(Tab.Agents)
     }
 
-    BackHandler(enabled = nav.stack.size > 1) {
-        if (nav.current == Screen.Dashboard) app.disconnect()
-        nav.pop()
-    }
+    BackHandler(enabled = nav.stack.size > 1 || nav.tab != Tab.Agents) { nav.back() }
 
     AnimatedContent(
         targetState = nav.current,
@@ -108,15 +111,55 @@ private fun ScreenContent(
     snapshot: dev.cambraia.openherdr.data.Snapshot,
 ) {
     when (screen) {
-        Screen.Servers -> ServersScreen(
-            profiles = store.profiles,
-            onConnect = { profile ->
+        Screen.Home -> HomeScreen(
+            tab = nav.tab,
+            blocked = snapshot.agents.count { it.status == AgentStatus.Blocked },
+            onTab = { nav.tab = it },
+        ) { tab ->
+            val connect = { profile: ServerProfile ->
                 app.connect(profile)
-                nav.push(Screen.Dashboard)
-            },
-            onEdit = { nav.push(Screen.Editor(it?.id)) },
-            onDeviceKey = { nav.push(Screen.DeviceKey) },
-        )
+                nav.tab = Tab.Agents
+            }
+            when (tab) {
+                Tab.Agents -> AgentsTab(
+                    connection = connection,
+                    snapshot = snapshot,
+                    profiles = store.profiles,
+                    bottomInset = TabBarClearance,
+                    onConnect = connect,
+                    onAddServer = { nav.push(Screen.Editor(null)) },
+                    onOpenAgent = { nav.push(Screen.Agent(it.paneId)) },
+                    onRetry = { connection.activeProfile?.let(app::connect) },
+                    onDeviceKey = { nav.push(Screen.DeviceKey) },
+                    onTrust = { app.connections.trust(it) },
+                    onDisconnect = { app.disconnect() },
+                )
+                Tab.Servers -> ServersTab(
+                    profiles = store.profiles,
+                    liveId = (connection as? Connection.Connected)?.profile?.id,
+                    bottomInset = TabBarClearance,
+                    onConnect = connect,
+                    onEdit = { nav.push(Screen.Editor(it?.id)) },
+                )
+                Tab.Settings -> {
+                    var info by remember { mutableStateOf(SettingsInfo(null, null, false, "", BuildConfig.VERSION_NAME)) }
+                    LaunchedEffect(Unit) {
+                        info = withContext(Dispatchers.Default) {
+                            val identity = app.deviceKey.identity()
+                            val model = SpeechModel.locate(app)
+                            SettingsInfo(
+                                keyFingerprint = identity.fingerprint,
+                                keyProtection = app.deviceKey.protection().label(),
+                                voiceInstalled = model.installed,
+                                voicePath = model.dir.path,
+                                version = BuildConfig.VERSION_NAME,
+                            )
+                        }
+                    }
+                    SettingsTab(info, bottomInset = TabBarClearance, onDeviceKey = { nav.push(Screen.DeviceKey) })
+                }
+            }
+        }
 
         is Screen.Editor -> {
             val existing = store.profiles.firstOrNull { it.id == screen.profileId }
@@ -143,27 +186,23 @@ private fun ScreenContent(
             DeviceKeyScreen(info = info, onRegenerate = { info = null; generation++ }, onBack = { nav.pop() })
         }
 
-        Screen.Dashboard -> DashboardScreen(
-            connection = connection,
-            snapshot = snapshot,
-            onOpenAgent = { nav.push(Screen.Agent(it.paneId)) },
-            onRetry = { connection.activeProfile?.let(app::connect) },
-            onDeviceKey = { nav.push(Screen.DeviceKey) },
-            onTrust = { app.connections.trust(it) },
-            onDisconnect = {
-                app.disconnect()
-                nav.popTo(Screen.Servers)
-            },
-        )
-
         is Screen.Agent -> AgentScreen(
             paneId = screen.paneId,
             agent = snapshot.agents.firstOrNull { it.paneId == screen.paneId },
             revision = snapshot.revision,
+            files = { app.connections.files },
+            dictation = app.dictation,
             read = { app.connections.read(it) },
             submit = { pane, text -> app.connections.submit(pane, text) },
             sendKeys = { pane, keys -> app.connections.sendKeys(pane, keys) },
             onBack = { nav.pop() },
         )
     }
+}
+
+private fun DeviceKey.Protection.label(): String = when (this) {
+    DeviceKey.Protection.StrongBox -> "StrongBox secure element"
+    DeviceKey.Protection.TrustedEnvironment -> "Trusted Execution Environment"
+    DeviceKey.Protection.Software -> "Software only"
+    DeviceKey.Protection.Unknown -> "Unknown protection"
 }

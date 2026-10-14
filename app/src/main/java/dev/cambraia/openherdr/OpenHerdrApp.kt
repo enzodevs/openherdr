@@ -7,6 +7,7 @@ import dev.cambraia.openherdr.data.ConnectionManager
 import dev.cambraia.openherdr.data.DeviceKey
 import dev.cambraia.openherdr.data.ServerProfile
 import dev.cambraia.openherdr.ssh.SshSession
+import dev.cambraia.openherdr.voice.Dictation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -17,6 +18,7 @@ class OpenHerdrApp : Application() {
     val store by lazy { AppStore(filesDir) }
     val deviceKey by lazy { DeviceKey() }
     val notifier by lazy { Notifier(this) }
+    val dictation by lazy { Dictation(this, scope) }
 
     val connections by lazy {
         ConnectionManager(
@@ -30,6 +32,12 @@ class OpenHerdrApp : Application() {
     override fun onCreate() {
         super.onCreate()
         notifier.createChannels()
+    }
+
+    /** The speech model holds ~700 MB; free it whenever the UI goes to the background. */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_UI_HIDDEN) dictation.release()
     }
 
     /** Connects and keeps the link alive in a foreground service so alerts keep arriving. */

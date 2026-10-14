@@ -1,5 +1,6 @@
 package dev.cambraia.openherdr.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,46 +13,42 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.ContainedLoadingIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MediumFlexibleTopAppBar
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.toShape
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.cambraia.openherdr.data.AgentAlerts
 import dev.cambraia.openherdr.data.Connection
+import dev.cambraia.openherdr.data.ServerProfile
 import dev.cambraia.openherdr.data.Snapshot
 import dev.cambraia.openherdr.protocol.Agent
 import dev.cambraia.openherdr.protocol.AgentStatus
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+/** Agents tab: the live board of the connected server, or a server picker when disconnected. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun DashboardScreen(
+fun AgentsTab(
     connection: Connection,
     snapshot: Snapshot,
+    profiles: List<ServerProfile>,
+    bottomInset: androidx.compose.ui.unit.Dp,
+    onConnect: (ServerProfile) -> Unit,
+    onAddServer: () -> Unit,
     onOpenAgent: (Agent) -> Unit,
     onRetry: () -> Unit,
     onDeviceKey: () -> Unit,
@@ -59,51 +56,84 @@ fun DashboardScreen(
     onDisconnect: () -> Unit,
 ) {
     val profile = connection.activeProfile
-    val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
-    Scaffold(
-        modifier = Modifier.nestedScroll(scroll.nestedScrollConnection),
-        topBar = {
-            MediumFlexibleTopAppBar(
-                title = { Text(profile?.name ?: "OpenHerdr", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                subtitle = { Text(connection.summary(), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                navigationIcon = { IconButton(onClick = onDisconnect) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
-                actions = { IconButton(onClick = onDisconnect) { Icon(Icons.Default.Close, contentDescription = "Disconnect") } },
-                scrollBehavior = scroll,
-            )
-        },
-    ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
-            when {
-                connection is Connection.Failed && !connection.retrying -> Message(
-                    shape = MaterialShapes.Ghostish,
+    LazyColumn(
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomInset),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        item(key = "header") {
+            ScreenHeader(
+                title = profile?.name ?: "Agents",
+                subtitle = connection.summary(),
+                inset = 8.dp,
+            ) {
+                if (profile != null) {
+                    FilledTonalIconButton(onClick = onDisconnect, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Glyphs.Power, contentDescription = "Disconnect")
+                    }
+                }
+            }
+        }
+        when {
+            profile == null && profiles.isEmpty() -> item(key = "first-run") {
+                EmptyState(
+                    shape = MaterialShapes.Cookie9Sided.toShape(),
+                    title = "Add your first server",
+                    body = "OpenHerdr connects over SSH to the machine where herdr runs. Nothing is installed there.",
+                    modifier = Modifier.padding(top = 48.dp),
+                ) { Button(onClick = onAddServer) { Text("Add server") } }
+            }
+            profile == null -> {
+                item(key = "pick") { SectionLabel("Connect to") }
+                items(profiles, key = { it.id }) { server ->
+                    ServerCard(server, live = false, onClick = { onConnect(server) }, modifier = Modifier.animateItem())
+                }
+            }
+            connection is Connection.Failed && !connection.retrying -> item(key = "auth") {
+                EmptyState(
+                    shape = MaterialShapes.Ghostish.toShape(),
                     title = "Could not sign in",
                     body = connection.message,
-                    primary = "Show device key" to onDeviceKey,
-                    secondary = "Try again" to onRetry,
-                )
-                connection is Connection.Refused -> Message(
-                    shape = MaterialShapes.Burst,
+                    tint = Graphite.needsYou.copy(alpha = 0.35f),
+                    modifier = Modifier.padding(top = 32.dp),
+                ) {
+                    Button(onClick = onDeviceKey) { Text("Show device key") }
+                    OutlinedButton(onClick = onRetry, modifier = Modifier.padding(top = 8.dp)) { Text("Try again") }
+                }
+            }
+            connection is Connection.Refused -> item(key = "refused") {
+                EmptyState(
+                    shape = MaterialShapes.Burst.toShape(),
                     title = "Server identity changed",
                     body = "Connection refused for your safety.",
-                    primary = "Back" to onDisconnect,
-                )
-                !snapshot.loaded -> Column(
-                    Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
+                    tint = Graphite.needsYou.copy(alpha = 0.35f),
+                    modifier = Modifier.padding(top = 32.dp),
+                ) { Button(onClick = onDisconnect) { Text("Close") } }
+            }
+            !snapshot.loaded -> item(key = "loading") {
+                Column(Modifier.fillMaxWidth().padding(top = 96.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     ContainedLoadingIndicator(Modifier.size(72.dp))
                     Spacer(Modifier.height(16.dp))
-                    Text(connection.summary(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(connection.summary(), color = Graphite.muted)
                 }
-                snapshot.agents.isEmpty() -> PullToRefreshBox(isRefreshing = false, onRefresh = onRetry, modifier = Modifier.fillMaxSize()) {
-                    Message(
-                        shape = MaterialShapes.Flower,
-                        title = "No agents yet",
-                        body = "Start Claude Code, Codex, Pi or another agent inside herdr and it shows up here.",
-                    )
+            }
+            snapshot.agents.isEmpty() -> item(key = "empty") {
+                EmptyState(
+                    shape = MaterialShapes.Flower.toShape(),
+                    title = "No agents yet",
+                    body = "Start Claude Code, Codex, Pi or another agent inside herdr and it shows up here.",
+                    modifier = Modifier.padding(top = 32.dp),
+                )
+            }
+            else -> {
+                item(key = "summary") { Summary(snapshot.agents) }
+                val labels = snapshot.workspaces.associate { it.id to it.label.ifBlank { "Workspace ${it.number}" } }
+                AgentAlerts.grouped(snapshot.agents, labels).forEach { (workspace, agents) ->
+                    item(key = "ws-$workspace") { SectionLabel(workspace, trailing = "${agents.size}", modifier = Modifier.animateItem()) }
+                    items(agents, key = { it.paneId }) { agent ->
+                        AgentCard(agent, Modifier.animateItem()) { onOpenAgent(agent) }
+                    }
                 }
-                else -> AgentList(snapshot, onOpenAgent)
             }
         }
     }
@@ -117,63 +147,39 @@ fun DashboardScreen(
 }
 
 @Composable
-private fun AgentList(snapshot: Snapshot, onOpenAgent: (Agent) -> Unit) {
-    val labels = snapshot.workspaces.associate { it.id to it.label.ifBlank { "Workspace ${it.number}" } }
-    val groups = AgentAlerts.grouped(snapshot.agents, labels)
-    LazyColumn(contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        item(key = "summary") { Summary(snapshot.agents) }
-        groups.forEach { (workspace, agents) ->
-            item(key = "ws-$workspace") {
-                Row(
-                    Modifier.padding(start = 8.dp, top = 20.dp, bottom = 8.dp).animateItem(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(workspace, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                    Text("  ${agents.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            itemsIndexed(agents, key = { _, agent -> agent.paneId }) { index, agent ->
-                AgentRow(agent, index, agents.size, Modifier.animateItem()) { onOpenAgent(agent) }
-            }
-        }
-    }
-}
-
-@Composable
 private fun Summary(agents: List<Agent>) {
-    val c = MaterialTheme.colorScheme
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Stat("Need you", agents.count { it.status == AgentStatus.Blocked }, c.errorContainer, c.onErrorContainer, Modifier.weight(1f))
-        Stat("Working", agents.count { it.status == AgentStatus.Working }, c.primaryContainer, c.onPrimaryContainer, Modifier.weight(1f))
-        Stat("Done", agents.count { it.status == AgentStatus.Done }, c.tertiaryContainer, c.onTertiaryContainer, Modifier.weight(1f))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Stat("Need you", agents.count { it.status == AgentStatus.Blocked }, AgentStatus.Blocked, Modifier.weight(1f))
+        Stat("Working", agents.count { it.status == AgentStatus.Working }, AgentStatus.Working, Modifier.weight(1f))
+        Stat("Done", agents.count { it.status == AgentStatus.Done }, AgentStatus.Done, Modifier.weight(1f))
     }
 }
 
 @Composable
-private fun Stat(label: String, count: Int, container: Color, content: Color, modifier: Modifier) {
-    Surface(color = container, contentColor = content, shape = MaterialTheme.shapes.large, modifier = modifier) {
+private fun Stat(label: String, count: Int, status: AgentStatus, modifier: Modifier) {
+    val loud = status == AgentStatus.Blocked && count > 0
+    Panel(modifier, color = if (loud) MaterialTheme.colorScheme.errorContainer else Graphite.raised) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-            Text("$count", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-            Text(label, style = MaterialTheme.typography.labelLarge)
+            Text("$count", style = MaterialTheme.typography.headlineLarge, color = if (count > 0) status.hue() else Graphite.faint)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = Graphite.muted)
         }
     }
 }
 
 @Composable
-private fun AgentRow(agent: Agent, index: Int, count: Int, modifier: Modifier, onClick: () -> Unit) {
+private fun AgentCard(agent: Agent, modifier: Modifier, onClick: () -> Unit) {
     val blocked = agent.status == AgentStatus.Blocked
-    Surface(
+    Panel(
+        modifier.fillMaxWidth(),
         onClick = onClick,
-        shape = segmentShape(index, count),
-        color = if (blocked) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainer,
-        modifier = modifier.fillMaxWidth(),
+        color = if (blocked) MaterialTheme.colorScheme.errorContainer else Graphite.raised,
     ) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             AgentAvatar(agent)
-            Column(Modifier.weight(1f).padding(horizontal = 16.dp)) {
+            Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
                 Text(agent.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 agent.subtitle?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = Graphite.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             StatusPill(agent.status)
@@ -181,36 +187,78 @@ private fun AgentRow(agent: Agent, index: Int, count: Int, modifier: Modifier, o
     }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+/** A server as a card: tinted mark, name and address; [live] marks the connected one. */
 @Composable
-private fun Message(
-    shape: androidx.graphics.shapes.RoundedPolygon,
-    title: String,
-    body: String,
-    primary: Pair<String, () -> Unit>? = null,
-    secondary: Pair<String, () -> Unit>? = null,
+fun ServerCard(
+    server: ServerProfile,
+    live: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    trailing: @Composable () -> Unit = { Icon(Glyphs.Chevron, contentDescription = null, tint = Graphite.faint) },
 ) {
-    Column(
-        Modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = shape.toShape(), modifier = Modifier.size(120.dp)) {}
-        Spacer(Modifier.height(24.dp))
-        Text(title, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(8.dp))
-        Text(body, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(24.dp))
-        primary?.let { (label, action) -> Button(onClick = action) { Text(label) } }
-        secondary?.let { (label, action) -> OutlinedButton(onClick = action, modifier = Modifier.padding(top = 8.dp)) { Text(label) } }
+    Panel(modifier.fillMaxWidth(), onClick = onClick) {
+        Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            ServerMark(server)
+            Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(server.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    if (live) Dot(Graphite.done, 6.dp, Modifier.padding(start = 6.dp))
+                }
+                Text(
+                    "${server.user}@${server.host}" + (if (server.port != 22) ":${server.port}" else "") +
+                        (server.herdrSession?.let { " · $it" } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = Mono,
+                    color = Graphite.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { trailing() }
+        }
     }
 }
 
-private fun Connection.summary(): String = when (this) {
-    Connection.Idle -> "Disconnected"
+private val MarkTints = listOf(Color(0xFF8CC4FF), Color(0xFF86DCA9), Color(0xFFE5B8FF), Color(0xFFFFC98A), Color(0xFF8FE3E0))
+
+/**
+ * Two letters and a tint picked from the host, so "PC (Wi-Fi)" and "PC (WireGuard)" differ:
+ * the capitals of the part in parentheses when there is one ("WF", "WG"), else of the name.
+ */
+@Composable
+private fun ServerMark(server: ServerProfile) {
+    val letters = serverInitials(server.name)
+    val tint = MarkTints[Math.floorMod(server.host.hashCode(), MarkTints.size)]
+    Surface(
+        color = tint.copy(alpha = 0.14f),
+        contentColor = tint,
+        shape = MaterialTheme.shapes.medium,
+        border = BorderStroke(1.dp, tint.copy(alpha = 0.18f)),
+        modifier = Modifier.size(44.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(letters, fontFamily = Display, style = MaterialTheme.typography.labelLarge)
+        }
+    }
+}
+
+fun serverInitials(name: String): String {
+    val focus = Regex("\\(([^)]+)\\)").find(name)?.groupValues?.get(1) ?: name
+    val capitals = focus.filter { it.isUpperCase() || it.isDigit() }
+    val words = focus.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.isNotEmpty() }
+    return when {
+        capitals.length >= 2 -> capitals.take(2)
+        words.size >= 2 -> "${words[0].first()}${words[1].first()}"
+        words.isNotEmpty() -> words[0].take(2)
+        else -> "?"
+    }.uppercase()
+}
+
+fun Connection.summary(): String = when (this) {
+    Connection.Idle -> "Not connected"
     is Connection.Connecting -> if (attempt == 0) "Connecting…" else "Reconnecting…"
     is Connection.Connected -> "Live · ${profile.user}@${profile.host}"
     is Connection.NeedsTrust -> "Waiting for you to trust the server"
     is Connection.Refused -> "Refused"
-    is Connection.Failed -> if (retrying) "Reconnecting… $message" else "Failed"
+    is Connection.Failed -> if (retrying) "Reconnecting… $message" else "Could not sign in"
 }

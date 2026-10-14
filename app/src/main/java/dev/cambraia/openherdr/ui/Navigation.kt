@@ -1,19 +1,26 @@
 package dev.cambraia.openherdr.ui
 
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 
+enum class Tab { Agents, Servers, Settings }
+
 sealed interface Screen {
-    data object Servers : Screen
+    /** The tabbed home; the selected tab lives in [NavViewModel.tab]. */
+    data object Home : Screen
     data class Editor(val profileId: String?) : Screen
     data object DeviceKey : Screen
-    data object Dashboard : Screen
     data class Agent(val paneId: String) : Screen
 }
 
-/** A tiny back stack that survives configuration changes. */
+/** A tiny back stack over the tabbed home that survives configuration changes. */
 class NavViewModel : ViewModel() {
-    val stack = mutableStateListOf<Screen>(Screen.Servers)
+    val stack = mutableStateListOf<Screen>(Screen.Home)
+
+    var tab by mutableStateOf(Tab.Agents)
 
     val current: Screen
         get() = stack.last()
@@ -35,17 +42,22 @@ class NavViewModel : ViewModel() {
         false
     }
 
-    /** Shows [screen] on top of the dashboard, dropping anything above it. */
-    fun showOverDashboard(screen: Screen) {
-        val dashboard = stack.indexOf(Screen.Dashboard)
-        if (dashboard < 0) return
-        forward = true
-        while (stack.lastIndex > dashboard) stack.removeAt(stack.lastIndex)
-        stack.add(screen)
+    /** Back from the home: other tabs return to Agents first. */
+    fun back(): Boolean = when {
+        pop() -> true
+        tab != Tab.Agents -> { tab = Tab.Agents; true }
+        else -> false
     }
 
-    fun popTo(screen: Screen) {
+    fun home(tab: Tab) {
         forward = false
-        while (stack.size > 1 && current != screen) stack.removeAt(stack.lastIndex)
+        while (stack.size > 1) stack.removeAt(stack.lastIndex)
+        this.tab = tab
+    }
+
+    /** Opens an agent from anywhere (notification taps), on top of the Agents tab. */
+    fun openAgent(paneId: String) {
+        home(Tab.Agents)
+        push(Screen.Agent(paneId))
     }
 }

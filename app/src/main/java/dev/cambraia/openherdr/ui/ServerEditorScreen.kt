@@ -73,7 +73,7 @@ fun ServerEditorScreen(
         ) {
             OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text("Home PC") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(
-                host, { host = it }, label = { Text("Host") }, placeholder = { Text("10.13.13.1") }, singleLine = true,
+                host, { host = it }, label = { Text("Host") }, placeholder = { Text("10.0.0.2") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next), modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(

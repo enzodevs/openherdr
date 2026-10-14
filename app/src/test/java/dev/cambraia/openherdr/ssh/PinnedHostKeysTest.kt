@@ -20,8 +20,8 @@ class PinnedHostKeysTest {
     @Test
     fun `unknown host is not included and is remembered as last seen`() {
         val repo = PinnedHostKeys(MemoryPinStore())
-        assertEquals(HostKeyRepository.NOT_INCLUDED, repo.check("10.13.13.1", ed))
-        assertEquals("10.13.13.1", repo.lastSeen!!.first)
+        assertEquals(HostKeyRepository.NOT_INCLUDED, repo.check("10.0.0.2", ed))
+        assertEquals("10.0.0.2", repo.lastSeen!!.first)
         assertEquals("ssh-ed25519", repo.lastSeen!!.second.keyType)
     }
 

@@ -7,10 +7,23 @@ Apache-2.0. Package `dev.cambraia.openherdr`. Single Gradle module `:app`.
 
 ```sh
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64   # JDK 17 with javac; the local JDK 21 is a JRE
-./gradlew :app:assembleDebug
+scripts/fetch-sherpa.sh                              # once: sherpa-onnx AAR into app/libs (SHA-256 pinned, not committed)
 ./gradlew :app:testDebugUnitTest                     # integration tests are skipped without OPENHERDR_IT_* env
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:assembleRelease                       # R8 + baseline profiles; debug builds stutter in Compose
+adb install -r app/build/outputs/apk/release/app-release.apk
 ```
+
+Release signing reads `~/.config/openherdr-release/keystore.properties` (or `$OPENHERDR_KEYSTORE_PROPERTIES`); never
+commit it. Without that file the release build is signed with the debug key. Android refuses to update an app across
+signing keys, and reinstalling deletes the Keystore device key, so a phone running a debug-signed build keeps getting
+debug-signed builds: `OPENHERDR_KEYSTORE_PROPERTIES=/none ./gradlew :app:assembleRelease`.
+
+### Speech model (dictation)
+
+Parakeet TDT 0.6B v3 int8 (`sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2` from the sherpa-onnx `asr-models`
+release, ~490 MB) is not bundled. Open the app once, then push `encoder.int8.onnx decoder.int8.onnx joiner.int8.onnx
+tokens.txt` to `/sdcard/Android/data/dev.cambraia.openherdr/files/models/parakeet-tdt-0.6b-v3-int8/`. Directories
+created by `adb` are `drwxrws---` owned by `shell`, which the app cannot enter: `chmod 771` them afterwards.
 
 ### Integration tests (real sshd + real herdr)
 
@@ -33,8 +46,16 @@ Clean up afterwards: `herdr --session ohdev server stop && herdr session delete 
   pinning per `host` / `[host]:port`. `EcdsaIdentity` turns JCA DER signatures into SSH ECDSA blobs.
 - `data/` — `ConnectionManager` (connect, subscribe, refresh on events, reconnect with backoff), `AgentAlerts` (pure
   transition diff for notifications), `AppStore` (profiles + pins in one atomic JSON file), `DeviceKey` (Keystore P-256).
-- `ui/` — Compose screens; `MainActivity` holds a tiny back stack (`NavViewModel`). `ConnectionService` is a
-  `specialUse` foreground service that keeps the link alive while connected.
+- `transcript/` — chat view of agent sessions. herdr integrations report `agent_session` (Claude Code and Codex: an
+  id; Pi: a path). `TranscriptLocator` finds the JSONL over SFTP (Claude: `~/.claude/projects/<cwd with
+  non-alphanumerics as '-'>/<id>.jsonl`; Codex: UUIDv7 id → `~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`),
+  `TranscriptTail` follows it, `ChatLog` parses each format. Fixtures are real lines with text replaced.
+- `voice/` — `Dictation`: AudioRecord 16 kHz float → sherpa-onnx `OfflineRecognizer` (`nemo_transducer`). The
+  recognizer loads while the user speaks and is released on `TRIM_MEMORY_UI_HIDDEN`.
+- `ui/` — Compose screens. `HomeScreen` hosts three tabs (Agents, Servers, Settings) under a floating `GlassTabBar`
+  (Kyant Backdrop: lens + blur on API 33+, blur on 31–32, solid below). `NavViewModel` is a tiny back stack over it.
+  Leaving the Agents tab or the app does not disconnect; only the power button or the notification does.
+  `ConnectionService` is a `specialUse` foreground service that keeps the link alive while connected.
 
 ## Conventions
 
@@ -46,4 +67,6 @@ Clean up afterwards: `herdr --session ohdev server stop && herdr session delete 
 - Key names for `pane.send_keys`: `enter esc tab shift+tab up down left right backspace ctrl+c` (no `pageup`).
 - Material 3 is pinned to 1.5.0-beta01 above the Compose BOM for the Expressive APIs (`MaterialShapes`,
   `LoadingIndicator`, button `shapes`). In 1.5, `RoundedPolygon.toShape()` is `@Composable`; do not wrap it in `remember`.
+- Visual identity "Graphite" (`ui/Theme.kt`): always dark, one cool neutral in four steps, near-white primary, color
+  only for agent status. Unbounded for headings, Geist for text, Geist Mono for code (bundled, OFL, `licenses/`).
 - Tests ship with the code. Run the mutation spot-checks for security-relevant logic (pinning, signatures).

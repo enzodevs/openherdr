@@ -56,15 +56,21 @@ import dev.cambraia.openherdr.ssh.HostKeyPin
 data class StatusStyle(val label: String, val container: Color, val content: Color)
 
 @Composable
-fun AgentStatus.style(): StatusStyle {
-    val c = MaterialTheme.colorScheme
-    return when (this) {
-        AgentStatus.Blocked -> StatusStyle("Needs you", c.error, c.onError)
-        AgentStatus.Working -> StatusStyle("Working", c.primaryContainer, c.onPrimaryContainer)
-        AgentStatus.Done -> StatusStyle("Done", c.tertiaryContainer, c.onTertiaryContainer)
-        AgentStatus.Idle -> StatusStyle("Idle", c.surfaceContainerHighest, c.onSurfaceVariant)
-        AgentStatus.Unknown -> StatusStyle("Unknown", c.surfaceContainerHigh, c.onSurfaceVariant)
-    }
+fun AgentStatus.style(): StatusStyle = when (this) {
+    AgentStatus.Blocked -> StatusStyle("Needs you", Graphite.needsYou, Color(0xFF2A0F0A))
+    AgentStatus.Working -> StatusStyle("Working", Graphite.working.copy(alpha = 0.16f), Graphite.working)
+    AgentStatus.Done -> StatusStyle("Done", Graphite.done.copy(alpha = 0.16f), Graphite.done)
+    AgentStatus.Idle -> StatusStyle("Idle", Graphite.high, Graphite.muted)
+    AgentStatus.Unknown -> StatusStyle("Unknown", Graphite.high, Graphite.faint)
+}
+
+/** The status hue alone, for dots and accents. */
+fun AgentStatus.hue(): Color = when (this) {
+    AgentStatus.Blocked -> Graphite.needsYou
+    AgentStatus.Working -> Graphite.working
+    AgentStatus.Done -> Graphite.done
+    AgentStatus.Idle -> Graphite.idle
+    AgentStatus.Unknown -> Graphite.faint
 }
 
 /** Short mark for well-known agents; the first letter otherwise. */
@@ -106,7 +112,7 @@ fun AgentAvatar(agent: Agent, size: Dp = 48.dp) {
                 .rotate(if (agent.status == AgentStatus.Working) angle else 0f)
                 .background(container, shape),
         )
-        Text(agent.mark(), color = style.content, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(agent.mark(), color = style.content, fontFamily = Display, fontWeight = FontWeight.Medium, fontSize = (size.value * 0.3f).sp)
     }
 }
 
@@ -122,6 +128,7 @@ fun StatusPill(status: AgentStatus, modifier: Modifier = Modifier) {
         ) {
             Box(Modifier.size(6.dp).background(style.content, CircleShape))
             Text(style.label, style = MaterialTheme.typography.labelMedium)
+
         }
     }
 }
@@ -143,7 +150,7 @@ fun segmentShape(index: Int, count: Int): Shape {
 fun TerminalText(raw: String, modifier: Modifier = Modifier) {
     val text = remember(raw) { Ansi.parse(raw).toAnnotated() }
     SelectionContainer(modifier) {
-        Text(text, color = Terminal.foreground, fontFamily = FontFamily.Monospace, fontSize = 12.sp, lineHeight = 16.sp)
+        Text(text, color = Terminal.foreground, fontFamily = Mono, fontSize = 12.sp, lineHeight = 17.sp)
     }
 }
 
@@ -176,7 +183,7 @@ private fun AnsiText.toAnnotated(): AnnotatedString = buildAnnotatedString {
 fun Fingerprint(text: String) {
     Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.medium) {
         SelectionContainer {
-            Text(text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(14.dp))
+            Text(text, fontFamily = Mono, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(14.dp))
         }
     }
 }

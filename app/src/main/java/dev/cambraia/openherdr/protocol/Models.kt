@@ -38,6 +38,7 @@ data class Agent(
     val cwd: String? = null,
     @SerialName("foreground_cwd") val foregroundCwd: String? = null,
     @SerialName("state_change_seq") val stateChangeSeq: Long = 0,
+    @SerialName("agent_session") val session: AgentSessionRef? = null,
 ) {
     val label: String
         get() = name ?: displayAgent ?: agent ?: paneId
@@ -45,6 +46,15 @@ data class Agent(
     val subtitle: String?
         get() = title ?: terminalTitle ?: foregroundCwd ?: cwd
 }
+
+/** The agent's own session, reported by herdr integrations: an id (`kind = "id"`) or a file path. */
+@Serializable
+data class AgentSessionRef(
+    val agent: String,
+    val kind: String,
+    val value: String,
+    val source: String? = null,
+)
 
 @Serializable
 data class Workspace(

@@ -11,3 +11,6 @@ captures/
 *.aab
 *.jks
 *.keystore
+app/libs/*.aar
+keystore.properties
+hs_err_pid*.log
