@@ -101,10 +101,13 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
-import dev.cambraia.openherdr.protocol.Agent
+import dev.cambraia.openherdr.data.PaneNode
+import dev.cambraia.openherdr.data.Topology
 import dev.cambraia.openherdr.protocol.AgentStatus
 import dev.cambraia.openherdr.protocol.PaneRead
+import dev.cambraia.openherdr.protocol.Ansi
 import dev.cambraia.openherdr.transcript.ChatFeed
+import dev.cambraia.openherdr.transcript.QuestionKeys
 import dev.cambraia.openherdr.transcript.ChatItem
 import dev.cambraia.openherdr.transcript.RemoteFiles
 import dev.cambraia.openherdr.transcript.TranscriptLocator
@@ -120,7 +123,7 @@ private val QuickKeys = listOf(
     "Enter" to listOf("enter"), "y" to listOf("y"), "n" to listOf("n"),
     "1" to listOf("1"), "2" to listOf("2"), "3" to listOf("3"),
     "↑" to listOf("up"), "↓" to listOf("down"), "Tab" to listOf("tab"),
-    "⇧Tab" to listOf("shift+tab"), "Esc" to listOf("esc"),
+    "⇧Tab" to listOf("shift+tab"), "Space" to listOf("space"), "Esc" to listOf("esc"),
 )
 
 private sealed interface ChatState {
@@ -133,15 +136,19 @@ private sealed interface ChatState {
 @Composable
 fun AgentScreen(
     paneId: String,
-    agent: Agent?,
+    node: PaneNode?,
+    home: String?,
     revision: Long,
     files: () -> RemoteFiles?,
     dictation: Dictation,
     read: suspend (String) -> PaneRead,
     submit: suspend (String, String) -> Unit,
     sendKeys: suspend (String, List<String>) -> Unit,
+    onRename: suspend (String?) -> Unit,
+    onClose: suspend () -> Unit,
     onBack: () -> Unit,
 ) {
+    val agent = node?.agent
     val chatCapable = agent?.let(TranscriptLocator::format) != null
     var mode by rememberSaveable(paneId) { mutableIntStateOf(if (chatCapable) 0 else 1) }
     val showChat = mode == 0 && chatCapable
@@ -152,6 +159,9 @@ fun AgentScreen(
     var draft by rememberSaveable { mutableStateOf("") }
     var keysOpen by rememberSaveable { mutableStateOf(false) }
     var confirmInterrupt by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var closing by remember { mutableStateOf(false) }
+    var seen by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
@@ -171,6 +181,33 @@ fun AgentScreen(
             runCatching { block() }.onFailure { snackbar.showSnackbar(it.message ?: "Could not send") }
             delay(250)
             reload()
+        }
+    }
+
+    // A choice answered from a card: never sent twice, and only when the screen shows that question.
+    var answered by remember { mutableStateOf<Set<String>>(emptySet()) }
+    fun answer(question: ChatItem.Question, index: Int) {
+        if (question.key in answered) return
+        answered = answered + question.key
+        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+        scope.launch {
+            val screen = runCatching { read(paneId).text }.getOrNull()?.let { Ansi.parse(it).text }
+            val keys = screen?.let { QuestionKeys.choose(question.questions[0], index, it) }
+            if (keys == null) {
+                answered = answered - question.key
+                mode = 1
+                snackbar.showSnackbar("The question is not on screen as expected. Answer it here in the terminal.")
+                return@launch
+            }
+            runCatching { sendKeys(paneId, keys) }.onFailure {
+                answered = answered - question.key
+                snackbar.showSnackbar(it.message ?: "Could not send")
+            }
+            delay(250)
+            reload()
+            // The transcript normally marks it answered well before this; if not, let the user retry.
+            delay(8_000)
+            answered = answered - question.key
         }
     }
 
@@ -208,6 +245,11 @@ fun AgentScreen(
     }
 
     LaunchedEffect(Unit) { dictation.refresh() }
+
+    // Closed here or on the PC: once the pane has been seen and is gone, leave.
+    LaunchedEffect(node == null) {
+        if (node != null) seen = true else if (seen) onBack()
+    }
 
     // Terminal output: polled while the terminal is shown, or while a prompt waits for an answer.
     LaunchedEffect(paneId, showChat, blocked) {
@@ -247,7 +289,13 @@ fun AgentScreen(
 
     Box(Modifier.fillMaxSize().background(Graphite.page)) {
         Column(Modifier.fillMaxSize().imePadding()) {
-            AgentHeader(agent, paneId, chatCapable, mode, onMode = { mode = it }, onBack = onBack)
+            PaneHeader(
+                node, paneId, home, chatCapable, mode, onMode = { mode = it }, onBack = onBack,
+                actions = listOf(
+                    MenuAction("Rename pane") { renaming = true },
+                    MenuAction("Close pane…", danger = true) { closing = true },
+                ),
+            )
 
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 AnimatedContent(
@@ -256,7 +304,7 @@ fun AgentScreen(
                     label = "mode",
                 ) { chatMode ->
                     if (chatMode) {
-                        ChatView(chat, onOpenTerminal = { mode = 1 })
+                        ChatView(chat, answered, onAnswer = ::answer, onOpenTerminal = { mode = 1 })
                     } else {
                         TerminalView(output)
                     }
@@ -278,6 +326,7 @@ fun AgentScreen(
                 draft = draft,
                 onDraft = { draft = it },
                 voice = voice,
+                placeholder = if (agent != null) "Message the agent" else "Run a command",
                 keysOpen = keysOpen || !showChat,
                 canToggleKeys = showChat,
                 onToggleKeys = { keysOpen = !keysOpen },
@@ -294,7 +343,12 @@ fun AgentScreen(
         AlertDialog(
             onDismissRequest = { confirmInterrupt = false },
             title = { Text("Send Ctrl+C?") },
-            text = { Text("This interrupts what the agent is doing and may end its session.") },
+            text = {
+                Text(
+                    if (agent != null) "This interrupts what the agent is doing and may end its session."
+                    else "This interrupts the command running in this pane.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     confirmInterrupt = false
@@ -304,21 +358,41 @@ fun AgentScreen(
             dismissButton = { TextButton(onClick = { confirmInterrupt = false }) { Text("Cancel") } },
         )
     }
+    if (renaming && node != null) {
+        RenameDialog("Rename pane", node.pane.label.orEmpty(), allowEmpty = true, onRename = { onRename(it.ifEmpty { null }) }, onDismiss = { renaming = false })
+    }
+    if (closing && node != null) {
+        ConfirmCloseDialog(
+            "Close pane ${node.title}?", describePanes(listOf(node), home), agentWarning(listOf(node)),
+            onClose = onClose, onDismiss = { closing = false },
+        )
+    }
 }
 
 @Composable
-private fun AgentHeader(agent: Agent?, paneId: String, chatCapable: Boolean, mode: Int, onMode: (Int) -> Unit, onBack: () -> Unit) {
+private fun PaneHeader(
+    node: PaneNode?,
+    paneId: String,
+    home: String?,
+    chatCapable: Boolean,
+    mode: Int,
+    onMode: (Int) -> Unit,
+    onBack: () -> Unit,
+    actions: List<MenuAction>,
+) {
     Column(Modifier.fillMaxWidth().statusBarsPadding().padding(top = 4.dp, bottom = 8.dp)) {
-        Row(Modifier.padding(start = 4.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 4.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
-            agent?.let { AgentAvatar(it, size = 40.dp) }
+            node?.let { PaneMark(it, size = 40.dp) }
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(agent?.label ?: paneId, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                agent?.subtitle?.let {
+                Text(node?.title ?: paneId, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                node?.detail?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = Graphite.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
+                node?.cwd?.let { CwdLine(Topology.tilde(it, home)) }
             }
-            agent?.let { StatusPill(it.status) }
+            node?.agent?.let { StatusPill(it.status) }
+            if (node != null) Overflow("Pane actions", actions)
         }
         if (chatCapable) {
             Segmented(
@@ -333,7 +407,12 @@ private fun AgentHeader(agent: Agent?, paneId: String, chatCapable: Boolean, mod
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun ChatView(state: ChatState, onOpenTerminal: () -> Unit) {
+private fun ChatView(
+    state: ChatState,
+    answered: Set<String>,
+    onAnswer: (ChatItem.Question, Int) -> Unit,
+    onOpenTerminal: () -> Unit,
+) {
     when (state) {
         ChatState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator() }
         is ChatState.Unavailable -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -372,6 +451,12 @@ private fun ChatView(state: ChatState, onOpenTerminal: () -> Unit) {
                             is ChatItem.Assistant -> AssistantText(item.text)
                             is ChatItem.Thought -> ThoughtRow(item.text)
                             is ChatItem.Tool -> ToolCard(item)
+                            is ChatItem.Question -> QuestionCard(
+                                item,
+                                sending = item.key in answered,
+                                onChoose = { onAnswer(item, it) },
+                                onOpenTerminal = onOpenTerminal,
+                            )
                         }
                     }
                 }
@@ -482,6 +567,96 @@ private fun ToolCard(tool: ChatItem.Tool) {
     }
 }
 
+/**
+ * An agent's question with its options. A single-choice question is answered by tapping an
+ * option; multi-select, free text and Claude's multi-question forms go to the terminal.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun QuestionCard(item: ChatItem.Question, sending: Boolean, onChoose: (Int) -> Unit, onOpenTerminal: () -> Unit) {
+    val pending = !item.finished
+    Panel(
+        Modifier.fillMaxWidth().animateContentSize().semantics { if (pending) liveRegion = LiveRegionMode.Polite },
+        color = if (pending) Graphite.raised else Graphite.surface,
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Dot(if (pending) Graphite.needsYou else if (item.failed) Graphite.faint else Graphite.done, 5.dp)
+                Text(
+                    when {
+                        pending -> "Question for you"
+                        item.failed -> "Not answered"
+                        else -> "Answered"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Graphite.muted,
+                    modifier = Modifier.padding(start = 6.dp),
+                )
+            }
+            item.questions.forEach { ask ->
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ask.header?.let { Text(it.uppercase(), style = MaterialTheme.typography.labelSmall, color = Graphite.faint) }
+                    Text(ask.question, style = MaterialTheme.typography.titleMedium)
+                    ask.details?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Graphite.muted) }
+                    if (pending && ask.multiSelect) {
+                        Text("Pick several", style = MaterialTheme.typography.labelSmall, color = Graphite.faint)
+                    }
+                    if (pending) {
+                        ask.options.forEachIndexed { index, option ->
+                            OptionRow(
+                                number = index + 1,
+                                option = option,
+                                enabled = item.simple && !sending,
+                                onClick = { onChoose(index) },
+                            )
+                        }
+                    }
+                }
+            }
+            if (pending) {
+                if (sending) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        LoadingIndicator(Modifier.size(20.dp))
+                        Text("Sending your choice…", style = MaterialTheme.typography.bodySmall, color = Graphite.muted, modifier = Modifier.padding(start = 8.dp))
+                    }
+                } else {
+                    if (!item.simple) {
+                        Text(
+                            "Answer this one in the terminal: use ↑ ↓, Space to mark and Enter to confirm.",
+                            style = MaterialTheme.typography.bodySmall, color = Graphite.muted,
+                        )
+                    }
+                    OutlinedButton(onClick = onOpenTerminal, shapes = ButtonDefaults.shapes()) {
+                        Text(if (item.simple) "Other answer in terminal" else "Answer in terminal")
+                    }
+                }
+            } else if (!item.answer.isNullOrBlank()) {
+                Text(item.answer, style = MaterialTheme.typography.bodySmall, color = Graphite.muted, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@Composable
+private fun OptionRow(number: Int, option: ChatItem.Option, enabled: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        color = Graphite.high,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("$number", fontFamily = Mono, fontSize = 13.sp, color = Graphite.faint, modifier = Modifier.width(22.dp))
+            Column(Modifier.weight(1f)) {
+                Text(option.label, style = MaterialTheme.typography.bodyLarge, color = if (enabled) Graphite.text else Graphite.muted)
+                option.description?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Graphite.muted) }
+            }
+        }
+    }
+}
+
 @Composable
 private fun TerminalView(output: String) {
     val scroll = rememberScrollState()
@@ -530,6 +705,7 @@ private fun PromptBanner(excerpt: String?, onKeys: (List<String>) -> Unit) {
 private fun Composer(
     draft: String,
     onDraft: (String) -> Unit,
+    placeholder: String,
     voice: DictationState,
     keysOpen: Boolean,
     canToggleKeys: Boolean,
@@ -564,7 +740,7 @@ private fun Composer(
                     else -> TextField(
                         value = draft,
                         onValueChange = onDraft,
-                        placeholder = { Text("Message the agent") },
+                        placeholder = { Text(placeholder) },
                         maxLines = 6,
                         shape = RoundedCornerShape(28.dp),
                         colors = TextFieldDefaults.colors(

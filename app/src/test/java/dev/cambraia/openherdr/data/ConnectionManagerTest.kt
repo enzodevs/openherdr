@@ -31,6 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger
 /** In-memory herdr: answers requests from [statuses] and lets tests push status events. */
 private class FakeHerdr {
     val statuses = linkedMapOf("w1:p1" to "idle")
+
+    /** Plain terminals in w2 and what each runs (null: shell prompt). */
+    val plain = linkedMapOf<String, String?>("w2:p1" to "just qa-tunnel")
+    @Volatile var tabLabel = "tunnel"
+    val methods = CopyOnWriteArrayList<String>()
     private val subscribers = CopyOnWriteArrayList<QueueInputStream>()
     @Volatile var connected = true
 
@@ -67,12 +72,28 @@ private class FakeHerdr {
     private fun handle(request: String, replies: QueueInputStream) {
         val obj = Json.parseToJsonElement(request).jsonObject
         val id = obj["id"]!!.jsonPrimitive.content
-        val result = when (obj["method"]!!.jsonPrimitive.content) {
+        val method = obj["method"]!!.jsonPrimitive.content
+        val params = obj["params"]?.jsonObject
+        methods += listOfNotNull(method, params?.get("pane_id")?.jsonPrimitive?.content).joinToString(" ")
+        val result = when (method) {
             "ping" -> """{"type":"pong","protocol":22}"""
             "agent.list" -> statuses.entries.joinToString(",", """{"type":"agent_list","agents":[""", "]}") { (pane, status) ->
                 """{"pane_id":"$pane","workspace_id":"w1","tab_id":"w1:t1","terminal_id":"t-$pane","agent":"fake","agent_status":"$status"}"""
             }
             "workspace.list" -> """{"type":"workspace_list","workspaces":[{"workspace_id":"w1","number":1,"label":"demo"}]}"""
+            "tab.list" -> """{"type":"tab_list","tabs":[{"tab_id":"w1:t1","workspace_id":"w1","number":1,"label":"1"},{"tab_id":"w2:t1","workspace_id":"w2","number":1,"label":"$tabLabel"}]}"""
+            "pane.list" -> (statuses.keys.map { """{"pane_id":"$it","workspace_id":"w1","tab_id":"w1:t1","agent":"fake","agent_status":"${statuses[it]}"}""" } +
+                plain.keys.map { """{"pane_id":"$it","workspace_id":"w2","tab_id":"w2:t1","agent_status":"unknown","cwd":"/tmp"}""" })
+                .joinToString(",", """{"type":"pane_list","panes":[""", "]}")
+            "pane.process_info" -> {
+                val cmd = plain[params!!["pane_id"]!!.jsonPrimitive.content]
+                val fg = if (cmd == null) """{"pid":10,"name":"zsh","cmdline":"zsh"}""" else """{"pid":11,"name":"just","cmdline":"$cmd"}"""
+                """{"type":"pane_process_info","process_info":{"shell_pid":10,"foreground_processes":[$fg]}}"""
+            }
+            "tab.rename" -> {
+                tabLabel = params!!["label"]!!.jsonPrimitive.content
+                """{"type":"ok"}"""
+            }
             "events.subscribe" -> {
                 subscribers += replies
                 """{"type":"subscription_started"}"""
@@ -184,5 +205,32 @@ class ConnectionManagerTest {
         m.disconnect()
         assertEquals(Connection.Idle, m.connection.value)
         assertEquals(false, m.snapshot.value.loaded)
+    }
+
+    @Test
+    fun `the snapshot holds tabs, plain panes and what they run`() {
+        val herdr = FakeHerdr()
+        herdr.plain["w2:p2"] = null
+        val m = manager({ herdr.link() })
+        m.connect(profile)
+        val snap = waitFor("loaded", { m.snapshot.value }) { it.loaded }
+        assertEquals(listOf("w1:p1", "w2:p1", "w2:p2"), snap.panes.map { it.id })
+        assertEquals(listOf("w1:t1", "w2:t1"), snap.tabs.map { it.id })
+        assertEquals("just qa-tunnel", snap.commands["w2:p1"])
+        assertEquals(null, snap.commands["w2:p2"])
+        // Agents are never asked for process info: their card shows the agent instead.
+        val asked = herdr.methods.filter { it.startsWith("pane.process_info") }.toSet()
+        assertEquals(setOf("pane.process_info w2:p1", "pane.process_info w2:p2"), asked)
+    }
+
+    @Test
+    fun `a change reloads the snapshot without waiting for an event`() {
+        val herdr = FakeHerdr()
+        val m = manager({ herdr.link() })
+        m.connect(profile)
+        waitFor("loaded", { m.snapshot.value }) { it.loaded }
+        runBlocking { m.change { renameTab("w2:t1", "logs") } }
+        val snap = waitFor("renamed", { m.snapshot.value }) { s -> s.tabs.any { it.label == "logs" } }
+        assertEquals("logs", snap.tabs.single { it.id == "w2:t1" }.label)
     }
 }

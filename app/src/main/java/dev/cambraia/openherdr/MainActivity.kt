@@ -25,6 +25,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.cambraia.openherdr.data.Connection
+import dev.cambraia.openherdr.data.ConnectionManager
+import dev.cambraia.openherdr.data.Topology
+import dev.cambraia.openherdr.ui.TreeActions
 import dev.cambraia.openherdr.ui.AgentScreen
 import dev.cambraia.openherdr.ui.AgentsTab
 import dev.cambraia.openherdr.ui.HomeScreen
@@ -128,7 +131,8 @@ private fun ScreenContent(
                     bottomInset = TabBarClearance,
                     onConnect = connect,
                     onAddServer = { nav.push(Screen.Editor(null)) },
-                    onOpenAgent = { nav.push(Screen.Agent(it.paneId)) },
+                    onOpenPane = { nav.push(Screen.Agent(it)) },
+                    actions = remember(app) { TreeActionsImpl(app.connections) },
                     onRetry = { connection.activeProfile?.let(app::connect) },
                     onDeviceKey = { nav.push(Screen.DeviceKey) },
                     onTrust = { app.connections.trust(it) },
@@ -188,16 +192,28 @@ private fun ScreenContent(
 
         is Screen.Agent -> AgentScreen(
             paneId = screen.paneId,
-            agent = snapshot.agents.firstOrNull { it.paneId == screen.paneId },
+            node = remember(snapshot) { Topology.find(Topology.build(snapshot), screen.paneId) },
+            home = snapshot.home,
             revision = snapshot.revision,
             files = { app.connections.files },
             dictation = app.dictation,
             read = { app.connections.read(it) },
             submit = { pane, text -> app.connections.submit(pane, text) },
             sendKeys = { pane, keys -> app.connections.sendKeys(pane, keys) },
+            onRename = { label -> app.connections.change { renamePane(screen.paneId, label) } },
+            onClose = { app.connections.change { closePane(screen.paneId) } },
             onBack = { nav.pop() },
         )
     }
+}
+
+private class TreeActionsImpl(private val connections: ConnectionManager) : TreeActions {
+    override suspend fun createWorkspace(label: String?, cwd: String?, command: String?) = connections.createWorkspace(label, cwd, command)
+    override suspend fun createTab(workspaceId: String, label: String?, command: String?) = connections.createTab(workspaceId, label, command)
+    override suspend fun renameWorkspace(workspaceId: String, label: String) = connections.change { renameWorkspace(workspaceId, label) }
+    override suspend fun renameTab(tabId: String, label: String) = connections.change { renameTab(tabId, label) }
+    override suspend fun closeWorkspace(workspaceId: String) = connections.change { closeWorkspace(workspaceId) }
+    override suspend fun closeTab(tabId: String) = connections.change { closeTab(tabId) }
 }
 
 private fun DeviceKey.Protection.label(): String = when (this) {

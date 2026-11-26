@@ -9,6 +9,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.Closeable
 import java.io.InputStream
 import java.io.OutputStream
@@ -48,6 +50,45 @@ class HerdrClient(
     suspend fun agents(): List<Agent> = HerdrProtocol.agents(call("agent.list"))
 
     suspend fun workspaces(): List<Workspace> = HerdrProtocol.workspaces(call("workspace.list"))
+
+    suspend fun tabs(): List<TabInfo> = HerdrProtocol.tabs(call("tab.list"))
+
+    suspend fun panes(): List<Pane> = HerdrProtocol.panes(call("pane.list"))
+
+    suspend fun processInfo(paneId: String): ProcessInfo =
+        HerdrProtocol.processInfo(call("pane.process_info", HerdrProtocol.paneParams(paneId)))
+
+    /** Returns the new workspace's root pane. */
+    suspend fun createWorkspace(label: String?, cwd: String?): String =
+        HerdrProtocol.rootPaneId(call("workspace.create", HerdrProtocol.createWorkspaceParams(label, cwd)))
+
+    /** Returns the new tab's root pane. */
+    suspend fun createTab(workspaceId: String, label: String?): String =
+        HerdrProtocol.rootPaneId(call("tab.create", HerdrProtocol.createTabParams(workspaceId, label)))
+
+    suspend fun renameWorkspace(workspaceId: String, label: String) {
+        call("workspace.rename", HerdrProtocol.renameWorkspaceParams(workspaceId, label))
+    }
+
+    suspend fun renameTab(tabId: String, label: String) {
+        call("tab.rename", HerdrProtocol.renameTabParams(tabId, label))
+    }
+
+    suspend fun renamePane(paneId: String, label: String?) {
+        call("pane.rename", HerdrProtocol.renamePaneParams(paneId, label))
+    }
+
+    suspend fun closeWorkspace(workspaceId: String) {
+        call("workspace.close", buildJsonObject { put("workspace_id", workspaceId) })
+    }
+
+    suspend fun closeTab(tabId: String) {
+        call("tab.close", buildJsonObject { put("tab_id", tabId) })
+    }
+
+    suspend fun closePane(paneId: String) {
+        call("pane.close", HerdrProtocol.paneParams(paneId))
+    }
 
     suspend fun read(paneId: String, lines: Int = 200, ansi: Boolean = false): PaneRead =
         HerdrProtocol.paneRead(call("pane.read", HerdrProtocol.readParams(paneId, lines, ansi)))

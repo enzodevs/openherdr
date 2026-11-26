@@ -30,12 +30,13 @@ created by `adb` are `drwxrws---` owned by `shell`, which the app cannot enter: 
 ```sh
 scripts/it-sshd.sh /tmp/oh-it 22022 &                 # throwaway unprivileged sshd on 127.0.0.1
 herdr --session ohdev server &                         # isolated herdr session
-HERDR_SESSION=ohdev herdr workspace create --cwd /tmp --label demo
-HERDR_SESSION=ohdev herdr pane run w1:p1 "$PWD/scripts/fake-agent.sh"
+herdr --session ohdev workspace create --cwd /tmp --label demo --no-focus
+herdr --session ohdev pane run w1:p1 "$PWD/scripts/fake-agent.sh"
 scripts/run-it.sh /tmp/oh-it -q                        # must report 4 passed, 0 skipped
 ```
 
-Clean up afterwards: `herdr --session ohdev server stop && herdr session delete ohdev`, stop the sshd, `rm -rf /tmp/oh-it`.
+Always pass `--session ohdev` to each CLI call: the `HERDR_SESSION` environment variable is not honored and the command
+lands in the user's real session. Clean up afterwards: `herdr --session ohdev server stop && herdr session delete ohdev`, stop the sshd, `rm -rf /tmp/oh-it`.
 
 ## Architecture
 
@@ -46,22 +47,27 @@ Clean up afterwards: `herdr --session ohdev server stop && herdr session delete 
   pinning per `host` / `[host]:port`. `EcdsaIdentity` turns JCA DER signatures into SSH ECDSA blobs.
 - `data/` — `ConnectionManager` (connect, subscribe, refresh on events, reconnect with backoff), `AgentAlerts` (pure
   transition diff for notifications), `AppStore` (profiles + pins in one atomic JSON file), `DeviceKey` (Keystore P-256).
+- `data/Topology` — pure workspace → tab → pane tree from `workspace.list`, `tab.list`, `pane.list` and, for panes
+  without an agent, `pane.process_info` (foreground command, null at the shell prompt). Plain terminals are first-class:
+  they open in the same terminal view and accept commands (send_text + Enter, which is all `herdr pane run` does).
+  Creates use `focus: false` so the PC keeps its focus; closes always go through a confirmation that lists what ends.
 - `transcript/` — chat view of agent sessions. herdr integrations report `agent_session` (Claude Code and Codex: an
   id; Pi: a path). `TranscriptLocator` finds the JSONL over SFTP (Claude: `~/.claude/projects/<cwd with
   non-alphanumerics as '-'>/<id>.jsonl`; Codex: UUIDv7 id → `~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`),
   `TranscriptTail` follows it, `ChatLog` parses each format. Fixtures are real lines with text replaced.
 - `voice/` — `Dictation`: AudioRecord 16 kHz float → sherpa-onnx `OfflineRecognizer` (`nemo_transducer`). The
   recognizer loads while the user speaks and is released on `TRIM_MEMORY_UI_HIDDEN`.
-- `ui/` — Compose screens. `HomeScreen` hosts three tabs (Agents, Servers, Settings) under a floating `GlassTabBar`
+- `ui/` — Compose screens. `HomeScreen` hosts three tabs (Workspaces, Servers, Settings) under a floating `GlassTabBar`
   (Kyant Backdrop: lens + blur on API 33+, blur on 31–32, solid below). `NavViewModel` is a tiny back stack over it.
-  Leaving the Agents tab or the app does not disconnect; only the power button or the notification does.
+  Leaving the Workspaces tab or the app does not disconnect; only the power button or the notification does.
   `ConnectionService` is a `specialUse` foreground service that keeps the link alive while connected.
 
 ## Conventions
 
 - herdr facts come from the installed binary: `herdr api schema --json`, `herdr --help`. Fixtures in tests are real
   captured lines; keep them real.
-- Events are invalidation signals followed by authoritative reads (`agent.list`, `workspace.list`), never replayed onto state.
+- Events are invalidation signals followed by authoritative reads (`agent.list`, `workspace.list`, `tab.list`,
+  `pane.list`), never replayed onto state. `ConnectionManager.change {}` refreshes right after the app's own changes.
 - `pane.agent_status_changed` needs a `pane_id`, so the subscription is reopened when the pane set changes.
 - Never add server-side components, OTA updates, telemetry or cloud services. Never weaken host key checks.
 - Key names for `pane.send_keys`: `enter esc tab shift+tab up down left right backspace ctrl+c` (no `pageup`).

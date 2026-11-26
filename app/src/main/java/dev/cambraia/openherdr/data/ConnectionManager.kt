@@ -3,7 +3,9 @@ package dev.cambraia.openherdr.data
 import dev.cambraia.openherdr.protocol.Agent
 import dev.cambraia.openherdr.protocol.HerdrClient
 import dev.cambraia.openherdr.protocol.HerdrException
+import dev.cambraia.openherdr.protocol.Pane
 import dev.cambraia.openherdr.protocol.PaneRead
+import dev.cambraia.openherdr.protocol.TabInfo
 import dev.cambraia.openherdr.protocol.StreamOpener
 import dev.cambraia.openherdr.protocol.Workspace
 import dev.cambraia.openherdr.ssh.PinStore
@@ -22,6 +24,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.Closeable
@@ -62,6 +66,12 @@ sealed interface Connection {
 data class Snapshot(
     val agents: List<Agent> = emptyList(),
     val workspaces: List<Workspace> = emptyList(),
+    val tabs: List<TabInfo> = emptyList(),
+    val panes: List<Pane> = emptyList(),
+    /** Foreground command of each plain pane; absent or null when it sits at the shell prompt. */
+    val commands: Map<String, String?> = emptyMap(),
+    /** The server user's home directory, to show paths as `~/…`; null until known. */
+    val home: String? = null,
     val loaded: Boolean = false,
     val revision: Long = 0,
 )
@@ -92,6 +102,9 @@ class ConnectionManager(
 
     @Volatile
     private var link: HerdrLink? = null
+
+    @Volatile
+    private var refresh: Channel<Unit>? = null
     private var job: Job? = null
 
     fun connect(profile: ServerProfile) {
@@ -110,6 +123,7 @@ class ConnectionManager(
         job?.cancel()
         job = null
         client = null
+        refresh = null
         link = null
         _connection.value = Connection.Idle
         _snapshot.value = Snapshot()
@@ -120,6 +134,23 @@ class ConnectionManager(
     suspend fun submit(paneId: String, text: String) = requireClient().submit(paneId, text)
 
     suspend fun sendKeys(paneId: String, keys: List<String>) = requireClient().sendKeys(paneId, keys)
+
+    /** Runs a change on the server, then reloads the snapshot right away instead of waiting for events. */
+    suspend fun <T> change(block: suspend HerdrClient.() -> T): T =
+        requireClient().block().also { refresh?.trySend(Unit) }
+
+    /** Creates a background workspace, runs [command] in it if given; returns its first pane once it is listed. */
+    suspend fun createWorkspace(label: String?, cwd: String?, command: String?): String =
+        created(change { createWorkspace(label, cwd) }, command)
+
+    suspend fun createTab(workspaceId: String, label: String?, command: String?): String =
+        created(change { createTab(workspaceId, label) }, command)
+
+    private suspend fun created(paneId: String, command: String?): String {
+        if (!command.isNullOrBlank()) requireClient().submit(paneId, command)
+        withTimeoutOrNull(5_000) { snapshot.first { s -> s.panes.any { it.id == paneId } } }
+        return paneId
+    }
 
     /** Files on the connected host, or null while disconnected. */
     val files: RemoteFiles?
@@ -161,6 +192,7 @@ class ConnectionManager(
                 lost = e
             } finally {
                 client = null
+                refresh = null
                 this.link = null
                 withContext(NonCancellable + io) { runCatching { link.close() } }
             }
@@ -178,17 +210,25 @@ class ConnectionManager(
         _connection.value = Connection.Connected(profile)
 
         val refresh = Channel<Unit>(Channel.CONFLATED)
+        this@ConnectionManager.refresh = refresh
         val subscribedPanes = MutableStateFlow<Set<String>?>(null)
         refresh.trySend(Unit)
+        val home = withContext(io) { runCatching { link.files?.home }.getOrNull() }
 
         launch {
             var previous: List<Agent>? = null
             for (signal in refresh) {
                 val agents = herdr.agents()
                 val workspaces = herdr.workspaces()
+                val tabs = herdr.tabs()
+                val panes = herdr.panes()
+                // One read per plain pane; a pane that closed meanwhile just has no command.
+                val commands = panes.filter { it.agent == null }.associate { pane ->
+                    pane.id to runCatching { herdr.processInfo(pane.id).command }.getOrNull()
+                }
                 AgentAlerts.transitions(previous, agents).takeIf { it.isNotEmpty() }?.let { onAlerts(profile, it) }
                 previous = agents
-                _snapshot.value = Snapshot(agents, workspaces, loaded = true, revision = _snapshot.value.revision + 1)
+                _snapshot.value = Snapshot(agents, workspaces, tabs, panes, commands, home, loaded = true, revision = _snapshot.value.revision + 1)
                 subscribedPanes.value = agents.mapTo(sortedSetOf()) { it.paneId }
             }
         }

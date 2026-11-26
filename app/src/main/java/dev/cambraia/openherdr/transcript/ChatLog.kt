@@ -24,6 +24,26 @@ sealed interface ChatItem {
     ) : ChatItem {
         val finished: Boolean get() = output != null
     }
+
+    /**
+     * The agent asked the user to choose (Pi `ask_user_question`, Claude `AskUserQuestion`).
+     * [answer] is the tool result once answered; [failed] when it was cancelled or rejected.
+     */
+    data class Question(
+        override val key: String,
+        val questions: List<Ask>,
+        val answer: String? = null,
+        val failed: Boolean = false,
+    ) : ChatItem {
+        val finished: Boolean get() = answer != null
+
+        /** One question, one choice: the only shape safe to answer with keys from the phone. */
+        val simple: Boolean get() = questions.size == 1 && !questions[0].multiSelect && questions[0].options.isNotEmpty()
+    }
+
+    data class Ask(val question: String, val details: String?, val options: List<Option>, val multiSelect: Boolean, val header: String? = null)
+
+    data class Option(val label: String, val description: String?)
 }
 
 /** The session file formats OpenHerdr understands. */
@@ -155,13 +175,18 @@ class ChatLog(private val format: TranscriptFormat) {
         val key = id?.let { "tool-$it" } ?: nextKey()
         if (id != null && id in toolIndex) return
         if (id != null) toolIndex[id] = items.size
-        add(ChatItem.Tool(key, name, describe(input)))
+        val questions = if (name in QUESTION_TOOLS) questions(input as? JsonObject) else emptyList()
+        add(if (questions.isNotEmpty()) ChatItem.Question(key, questions) else ChatItem.Tool(key, name, describe(input)))
     }
 
     private fun finishTool(id: String?, output: String?, failed: Boolean) {
         val index = id?.let(toolIndex::get) ?: return
-        val tool = items[index] as? ChatItem.Tool ?: return
-        items[index] = tool.copy(output = (output ?: "").trimEnd().take(MAX_OUTPUT), failed = failed)
+        val text = (output ?: "").trimEnd().take(MAX_OUTPUT)
+        items[index] = when (val item = items[index]) {
+            is ChatItem.Tool -> item.copy(output = text, failed = failed)
+            is ChatItem.Question -> item.copy(answer = text, failed = failed)
+            else -> return
+        }
     }
 
     private fun add(item: ChatItem) {
@@ -176,6 +201,20 @@ class ChatLog(private val format: TranscriptFormat) {
         private const val MAX_DETAIL = 240
         private val PREFERRED = listOf("command", "cmd", "file_path", "path", "pattern", "url", "query", "description", "prompt")
         private val json = Json { ignoreUnknownKeys = true }
+        private val QUESTION_TOOLS = setOf("ask_user_question", "AskUserQuestion")
+
+        /** Pi sends one question at the top level; Claude sends a `questions` list. */
+        fun questions(input: JsonObject?): List<ChatItem.Ask> {
+            if (input == null) return emptyList()
+            val list = (input["questions"] as? JsonArray)?.objects() ?: listOf(input)
+            return list.mapNotNull { q ->
+                val question = q.str("question")?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                val options = (q["options"] as? JsonArray)?.objects().orEmpty().mapNotNull { o ->
+                    o.str("label")?.let { ChatItem.Option(it, o.str("description")) }
+                }
+                ChatItem.Ask(question, q.str("details"), options, q.bool("multiSelect") == true, q.str("header"))
+            }
+        }
 
         /** The one-line summary of a tool call: its command, path or query when it has one. */
         fun describe(input: JsonElement?): String {

@@ -45,17 +45,4 @@ class AgentAlertsTest {
         val before = listOf(agent("w1:p1", AgentStatus.Idle))
         assertTrue(AgentAlerts.transitions(before, listOf(agent("w1:p1", AgentStatus.Working))).isEmpty())
     }
-
-    @Test
-    fun `workspaces needing attention come first`() {
-        val agents = listOf(
-            agent("w1:p1", AgentStatus.Idle, "w1"),
-            agent("w2:p2", AgentStatus.Working, "w2"),
-            agent("w2:p1", AgentStatus.Blocked, "w2"),
-        )
-        val groups = AgentAlerts.grouped(agents, mapOf("w1" to "api", "w2" to "web"))
-        assertEquals(listOf("web", "api"), groups.map { it.first })
-        assertEquals(listOf("w2:p1", "w2:p2"), groups[0].second.map { it.paneId })
-        assertNull(groups.find { it.first == "w3" })
-    }
 }

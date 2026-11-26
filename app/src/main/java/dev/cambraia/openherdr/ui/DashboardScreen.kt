@@ -32,12 +32,40 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import dev.cambraia.openherdr.data.AgentAlerts
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import dev.cambraia.openherdr.data.TabNode
+import dev.cambraia.openherdr.data.Topology
+import dev.cambraia.openherdr.data.WorkspaceNode
 import dev.cambraia.openherdr.data.Connection
 import dev.cambraia.openherdr.data.ServerProfile
 import dev.cambraia.openherdr.data.Snapshot
 import dev.cambraia.openherdr.protocol.Agent
 import dev.cambraia.openherdr.protocol.AgentStatus
+
+/** Server-side changes the tree can make; each suspends until herdr has answered. */
+interface TreeActions {
+    /** Returns the new workspace's first pane. */
+    suspend fun createWorkspace(label: String?, cwd: String?, command: String?): String
+    suspend fun createTab(workspaceId: String, label: String?, command: String?): String
+    suspend fun renameWorkspace(workspaceId: String, label: String)
+    suspend fun renameTab(tabId: String, label: String)
+    suspend fun closeWorkspace(workspaceId: String)
+    suspend fun closeTab(tabId: String)
+}
+
+private sealed interface TreeDialog {
+    data object NewWorkspace : TreeDialog
+    data class NewTab(val ws: WorkspaceNode) : TreeDialog
+    data class RenameWorkspace(val ws: WorkspaceNode) : TreeDialog
+    data class RenameTab(val tab: TabNode) : TreeDialog
+    data class CloseWorkspace(val ws: WorkspaceNode) : TreeDialog
+    data class CloseTab(val tab: TabNode) : TreeDialog
+}
 
 /** Agents tab: the live board of the connected server, or a server picker when disconnected. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -49,13 +77,15 @@ fun AgentsTab(
     bottomInset: androidx.compose.ui.unit.Dp,
     onConnect: (ServerProfile) -> Unit,
     onAddServer: () -> Unit,
-    onOpenAgent: (Agent) -> Unit,
+    onOpenPane: (String) -> Unit,
+    actions: TreeActions,
     onRetry: () -> Unit,
     onDeviceKey: () -> Unit,
     onTrust: (Connection.NeedsTrust) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val profile = connection.activeProfile
+    var dialog by remember { mutableStateOf<TreeDialog?>(null) }
     LazyColumn(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomInset),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -63,10 +93,15 @@ fun AgentsTab(
     ) {
         item(key = "header") {
             ScreenHeader(
-                title = profile?.name ?: "Agents",
+                title = profile?.name ?: "Workspaces",
                 subtitle = connection.summary(),
                 inset = 8.dp,
             ) {
+                if (connection is Connection.Connected && snapshot.loaded) {
+                    FilledTonalIconButton(onClick = { dialog = TreeDialog.NewWorkspace }, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.Default.Add, contentDescription = "New workspace")
+                    }
+                }
                 if (profile != null) {
                     FilledTonalIconButton(onClick = onDisconnect, shapes = IconButtonDefaults.shapes()) {
                         Icon(Glyphs.Power, contentDescription = "Disconnect")
@@ -117,25 +152,84 @@ fun AgentsTab(
                     Text(connection.summary(), color = Graphite.muted)
                 }
             }
-            snapshot.agents.isEmpty() -> item(key = "empty") {
+            snapshot.panes.isEmpty() -> item(key = "empty") {
                 EmptyState(
                     shape = MaterialShapes.Flower.toShape(),
-                    title = "No agents yet",
-                    body = "Start Claude Code, Codex, Pi or another agent inside herdr and it shows up here.",
+                    title = "No workspaces yet",
+                    body = "Create one here or in herdr. Agents and terminals show up as soon as they start.",
                     modifier = Modifier.padding(top = 32.dp),
-                )
+                ) { Button(onClick = { dialog = TreeDialog.NewWorkspace }) { Text("New workspace") } }
             }
             else -> {
-                item(key = "summary") { Summary(snapshot.agents) }
-                val labels = snapshot.workspaces.associate { it.id to it.label.ifBlank { "Workspace ${it.number}" } }
-                AgentAlerts.grouped(snapshot.agents, labels).forEach { (workspace, agents) ->
-                    item(key = "ws-$workspace") { SectionLabel(workspace, trailing = "${agents.size}", modifier = Modifier.animateItem()) }
-                    items(agents, key = { it.paneId }) { agent ->
-                        AgentCard(agent, Modifier.animateItem()) { onOpenAgent(agent) }
+                val tree = Topology.build(snapshot)
+                if (snapshot.agents.isNotEmpty()) item(key = "summary") { Summary(snapshot.agents) }
+                val waiting = Topology.needsYou(tree)
+                if (waiting.isNotEmpty()) {
+                    item(key = "needs") { SectionLabel("Needs you", trailing = "${waiting.size}", modifier = Modifier.animateItem()) }
+                    items(waiting, key = { "needs-${it.id}" }) { node ->
+                        PaneCard(node, snapshot.home, Modifier.animateItem()) { onOpenPane(node.id) }
+                    }
+                }
+                tree.forEach { ws ->
+                    item(key = "ws-${ws.workspace.id}") {
+                        WorkspaceHeader(
+                            ws,
+                            Modifier.animateItem(),
+                            actions = listOf(
+                                MenuAction("New tab") { dialog = TreeDialog.NewTab(ws) },
+                                MenuAction("Rename workspace") { dialog = TreeDialog.RenameWorkspace(ws) },
+                                MenuAction("Close workspace…", danger = true) { dialog = TreeDialog.CloseWorkspace(ws) },
+                            ),
+                        )
+                    }
+                    ws.tabs.forEach { tab ->
+                        item(key = "tab-${tab.tab.id}") {
+                            TabHeader(
+                                tab,
+                                Modifier.animateItem(),
+                                actions = listOf(
+                                    MenuAction("Rename tab") { dialog = TreeDialog.RenameTab(tab) },
+                                    MenuAction("Close tab…", danger = true) { dialog = TreeDialog.CloseTab(tab) },
+                                ),
+                            )
+                        }
+                        items(tab.panes, key = { it.id }) { node ->
+                            PaneCard(node, snapshot.home, Modifier.animateItem()) { onOpenPane(node.id) }
+                        }
                     }
                 }
             }
         }
+    }
+
+    when (val d = dialog) {
+        null -> Unit
+        TreeDialog.NewWorkspace -> CreateDialog(
+            "New workspace", withCwd = true, home = snapshot.home,
+            onCreate = { label, cwd, command -> onOpenPane(actions.createWorkspace(label, cwd, command)) },
+            onDismiss = { dialog = null },
+        )
+        is TreeDialog.NewTab -> CreateDialog(
+            "New tab in ${d.ws.title}", withCwd = false, home = snapshot.home,
+            onCreate = { label, _, command -> onOpenPane(actions.createTab(d.ws.workspace.id, label, command)) },
+            onDismiss = { dialog = null },
+        )
+        is TreeDialog.RenameWorkspace -> RenameDialog(
+            "Rename workspace", d.ws.workspace.label,
+            onRename = { actions.renameWorkspace(d.ws.workspace.id, it) }, onDismiss = { dialog = null },
+        )
+        is TreeDialog.RenameTab -> RenameDialog(
+            "Rename tab", d.tab.tab.label.takeIf { it != d.tab.tab.number.toString() }.orEmpty(),
+            onRename = { actions.renameTab(d.tab.tab.id, it) }, onDismiss = { dialog = null },
+        )
+        is TreeDialog.CloseWorkspace -> ConfirmCloseDialog(
+            "Close workspace ${d.ws.title}?", describePanes(d.ws.panes, snapshot.home), agentWarning(d.ws.panes),
+            onClose = { actions.closeWorkspace(d.ws.workspace.id) }, onDismiss = { dialog = null },
+        )
+        is TreeDialog.CloseTab -> ConfirmCloseDialog(
+            "Close tab ${d.tab.title}?", describePanes(d.tab.panes, snapshot.home), agentWarning(d.tab.panes),
+            onClose = { actions.closeTab(d.tab.tab.id) }, onDismiss = { dialog = null },
+        )
     }
 
     if (connection is Connection.NeedsTrust) {
@@ -162,27 +256,6 @@ private fun Stat(label: String, count: Int, status: AgentStatus, modifier: Modif
         Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
             Text("$count", style = MaterialTheme.typography.headlineLarge, color = if (count > 0) status.hue() else Graphite.faint)
             Text(label, style = MaterialTheme.typography.labelMedium, color = Graphite.muted)
-        }
-    }
-}
-
-@Composable
-private fun AgentCard(agent: Agent, modifier: Modifier, onClick: () -> Unit) {
-    val blocked = agent.status == AgentStatus.Blocked
-    Panel(
-        modifier.fillMaxWidth(),
-        onClick = onClick,
-        color = if (blocked) MaterialTheme.colorScheme.errorContainer else Graphite.raised,
-    ) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            AgentAvatar(agent)
-            Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
-                Text(agent.label, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                agent.subtitle?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = Graphite.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
-            StatusPill(agent.status)
         }
     }
 }

@@ -4,6 +4,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -63,6 +64,26 @@ object HerdrProtocol {
     fun workspaces(result: JsonObject): List<Workspace> =
         json.decodeFromJsonElement(ListSerializer(Workspace.serializer()), result.array("workspaces"))
 
+    fun tabs(result: JsonObject): List<TabInfo> =
+        json.decodeFromJsonElement(ListSerializer(TabInfo.serializer()), result.array("tabs"))
+
+    fun panes(result: JsonObject): List<Pane> =
+        json.decodeFromJsonElement(ListSerializer(Pane.serializer()), result.array("panes"))
+
+    fun processInfo(result: JsonObject): ProcessInfo {
+        val info = result["process_info"] as? JsonObject ?: throw HerdrException("malformed_response", "missing process_info")
+        val procs = (info["foreground_processes"] as? JsonArray).orEmpty().mapNotNull { element ->
+            val p = element as? JsonObject ?: return@mapNotNull null
+            val pid = p.string("pid")?.toLongOrNull() ?: return@mapNotNull null
+            ProcessInfo.Process(pid, p.string("name") ?: "", p.string("cmdline") ?: "")
+        }
+        return ProcessInfo(info.string("shell_pid")?.toLongOrNull(), procs)
+    }
+
+    /** The root pane of a `workspace.create` or `tab.create` result. */
+    fun rootPaneId(result: JsonObject): String =
+        (result["root_pane"] as? JsonObject)?.string("pane_id") ?: throw HerdrException("malformed_response", "missing root_pane")
+
     fun paneRead(result: JsonObject): PaneRead =
         json.decodeFromJsonElement(PaneRead.serializer(), result["read"] ?: result)
 
@@ -101,9 +122,40 @@ object HerdrProtocol {
         put("keys", JsonArray(keys.map(::JsonPrimitive)))
     }
 
+    fun paneParams(paneId: String): JsonObject = buildJsonObject { put("pane_id", paneId) }
+
+    /** Created in the background: the PC keeps whatever it has focused. */
+    fun createWorkspaceParams(label: String?, cwd: String?): JsonObject = buildJsonObject {
+        label?.let { put("label", it) }
+        cwd?.let { put("cwd", it) }
+        put("focus", false)
+    }
+
+    fun createTabParams(workspaceId: String, label: String?): JsonObject = buildJsonObject {
+        put("workspace_id", workspaceId)
+        label?.let { put("label", it) }
+        put("focus", false)
+    }
+
+    fun renameWorkspaceParams(workspaceId: String, label: String): JsonObject = buildJsonObject {
+        put("workspace_id", workspaceId)
+        put("label", label)
+    }
+
+    fun renameTabParams(tabId: String, label: String): JsonObject = buildJsonObject {
+        put("tab_id", tabId)
+        put("label", label)
+    }
+
+    /** A null [label] clears the pane's name. */
+    fun renamePaneParams(paneId: String, label: String?): JsonObject = buildJsonObject {
+        put("pane_id", paneId)
+        put("label", label?.let(::JsonPrimitive) ?: JsonNull)
+    }
+
     val LIFECYCLE_EVENTS = listOf(
         "workspace.created", "workspace.closed", "workspace.renamed",
-        "tab.created", "tab.closed",
+        "tab.created", "tab.closed", "tab.renamed",
         "pane.created", "pane.closed", "pane.exited", "pane.agent_detected",
     )
 

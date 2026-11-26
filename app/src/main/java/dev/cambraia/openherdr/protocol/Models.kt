@@ -65,6 +65,41 @@ data class Workspace(
     @SerialName("agent_status") val status: AgentStatus = AgentStatus.Unknown,
 )
 
+/** A tab inside a workspace (`tab.list`). */
+@Serializable
+data class TabInfo(
+    @SerialName("tab_id") val id: String,
+    @SerialName("workspace_id") val workspaceId: String,
+    val number: Int = 0,
+    val label: String = "",
+    val focused: Boolean = false,
+    @SerialName("agent_status") val status: AgentStatus = AgentStatus.Unknown,
+)
+
+/** Any pane (`pane.list`), agent or plain terminal; [agent] is null for the latter. */
+@Serializable
+data class Pane(
+    @SerialName("pane_id") val id: String,
+    @SerialName("workspace_id") val workspaceId: String,
+    @SerialName("tab_id") val tabId: String,
+    val agent: String? = null,
+    @SerialName("agent_status") val status: AgentStatus = AgentStatus.Unknown,
+    val label: String? = null,
+    @SerialName("terminal_title_stripped") val terminalTitle: String? = null,
+    val cwd: String? = null,
+    @SerialName("foreground_cwd") val foregroundCwd: String? = null,
+    val focused: Boolean = false,
+)
+
+/** The pane's foreground process group (`pane.process_info`). */
+data class ProcessInfo(val shellPid: Long?, val foreground: List<Process>) {
+    data class Process(val pid: Long, val name: String, val cmdline: String)
+
+    /** What the pane is running, or null when it sits at its shell prompt. */
+    val command: String?
+        get() = foreground.firstOrNull { it.pid != shellPid }?.let { it.cmdline.ifBlank { it.name } }
+}
+
 @Serializable
 data class PaneRead(
     @SerialName("pane_id") val paneId: String,

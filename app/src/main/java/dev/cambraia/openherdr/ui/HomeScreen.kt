@@ -42,7 +42,7 @@ fun HomeScreen(tab: Tab, blocked: Int, onTab: (Tab) -> Unit, content: @Composabl
         GlassTabBar(
             backdrop = backdrop,
             tabs = listOf(
-                TabItem("Agents", Glyphs.Agents, badge = blocked),
+                TabItem("Workspaces", Glyphs.Agents, badge = blocked),
                 TabItem("Servers", Glyphs.Servers),
                 TabItem("Settings", Icons.Default.Settings),
             ),

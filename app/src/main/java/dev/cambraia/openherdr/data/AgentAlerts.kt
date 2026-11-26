@@ -26,9 +26,4 @@ object AgentAlerts {
         }
     }
 
-    /** Workspaces in attention order, agents inside each in attention order. */
-    fun grouped(agents: List<Agent>, workspaceLabels: Map<String, String>): List<Pair<String, List<Agent>>> =
-        agents.groupBy { it.workspaceId }
-            .map { (id, list) -> (workspaceLabels[id] ?: id) to list.sortedWith(compareBy({ it.status.attentionRank }, { it.paneId })) }
-            .sortedWith(compareBy({ it.second.minOf { a -> a.status.attentionRank } }, { it.first }))
 }
