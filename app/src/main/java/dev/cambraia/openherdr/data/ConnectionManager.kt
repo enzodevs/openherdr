@@ -146,6 +146,12 @@ class ConnectionManager(
     suspend fun createTab(workspaceId: String, label: String?, command: String?): String =
         created(change { createTab(workspaceId, label) }, command)
 
+    /** Adds a pane next to [targetPaneId] in its tab, named [label] if given. */
+    suspend fun createPane(targetPaneId: String, direction: String, cwd: String?, label: String?, command: String?): String {
+        val pane = change { splitPane(targetPaneId, direction, cwd).also { id -> if (label != null) renamePane(id, label) } }
+        return created(pane, command)
+    }
+
     private suspend fun created(paneId: String, command: String?): String {
         if (!command.isNullOrBlank()) requireClient().submit(paneId, command)
         withTimeoutOrNull(5_000) { snapshot.first { s -> s.panes.any { it.id == paneId } } }

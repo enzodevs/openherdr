@@ -135,7 +135,7 @@ data class TabItem(val label: String, val icon: ImageVector, val badge: Int = 0)
  */
 @Composable
 fun GlassTabBar(backdrop: Backdrop, tabs: List<TabItem>, selected: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
-    val surface = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Color(0xFF16171A).copy(alpha = 0.55f) else Graphite.high.copy(alpha = 0.96f)
+    val surface = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Graphite.surface.copy(alpha = 0.55f) else Graphite.high.copy(alpha = 0.96f)
     BoxWithConstraints(
         modifier
             .height(64.dp)

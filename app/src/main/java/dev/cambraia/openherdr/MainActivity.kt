@@ -215,6 +215,8 @@ private fun ScreenContent(
 private class TreeActionsImpl(private val connections: ConnectionManager) : TreeActions {
     override suspend fun createWorkspace(label: String?, cwd: String?, command: String?) = connections.createWorkspace(label, cwd, command)
     override suspend fun createTab(workspaceId: String, label: String?, command: String?) = connections.createTab(workspaceId, label, command)
+    override suspend fun createPane(targetPaneId: String, direction: String, cwd: String?, label: String?, command: String?) =
+        connections.createPane(targetPaneId, direction, cwd, label, command)
     override suspend fun renameWorkspace(workspaceId: String, label: String) = connections.change { renameWorkspace(workspaceId, label) }
     override suspend fun renameTab(tabId: String, label: String) = connections.change { renameTab(tabId, label) }
     override suspend fun closeWorkspace(workspaceId: String) = connections.change { closeWorkspace(workspaceId) }

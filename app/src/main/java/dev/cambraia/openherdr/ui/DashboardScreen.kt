@@ -53,6 +53,8 @@ interface TreeActions {
     /** Returns the new workspace's first pane. */
     suspend fun createWorkspace(label: String?, cwd: String?, command: String?): String
     suspend fun createTab(workspaceId: String, label: String?, command: String?): String
+    /** Splits [targetPaneId] ("right" or "down"); returns the new pane. */
+    suspend fun createPane(targetPaneId: String, direction: String, cwd: String?, label: String?, command: String?): String
     suspend fun renameWorkspace(workspaceId: String, label: String)
     suspend fun renameTab(tabId: String, label: String)
     suspend fun closeWorkspace(workspaceId: String)
@@ -62,6 +64,7 @@ interface TreeActions {
 private sealed interface TreeDialog {
     data object NewWorkspace : TreeDialog
     data class NewTab(val ws: WorkspaceNode) : TreeDialog
+    data class NewPane(val tab: TabNode, val direction: String) : TreeDialog
     data class RenameWorkspace(val ws: WorkspaceNode) : TreeDialog
     data class RenameTab(val tab: TabNode) : TreeDialog
     data class CloseWorkspace(val ws: WorkspaceNode) : TreeDialog
@@ -195,7 +198,10 @@ fun AgentsTab(
                                 Modifier.animateItem(),
                                 collapsed = tab.tab.id in collapsed,
                                 onToggle = { if (!collapsed.remove(tab.tab.id)) collapsed.add(tab.tab.id) },
-                                actions = listOf(
+                                actions = listOfNotNull(
+                                    // A split needs a pane to split; herdr never leaves a tab without one.
+                                    MenuAction("New pane to the right") { dialog = TreeDialog.NewPane(tab, "right") }.takeIf { tab.panes.isNotEmpty() },
+                                    MenuAction("New pane below") { dialog = TreeDialog.NewPane(tab, "down") }.takeIf { tab.panes.isNotEmpty() },
                                     MenuAction("Rename tab") { dialog = TreeDialog.RenameTab(tab) },
                                     MenuAction("Close tab…", danger = true) { dialog = TreeDialog.CloseTab(tab) },
                                 ),
@@ -220,6 +226,14 @@ fun AgentsTab(
         is TreeDialog.NewTab -> CreateDialog(
             "New tab in ${d.ws.title}", withCwd = false, home = snapshot.home,
             onCreate = { label, _, command -> onOpenPane(actions.createTab(d.ws.workspace.id, label, command)) },
+            onDismiss = { dialog = null },
+        )
+        is TreeDialog.NewPane -> CreateDialog(
+            "New pane in ${d.tab.title}", withCwd = false, home = snapshot.home,
+            onCreate = { label, _, command ->
+                val beside = d.tab.panes.last()
+                onOpenPane(actions.createPane(beside.id, d.direction, beside.cwd, label, command))
+            },
             onDismiss = { dialog = null },
         )
         is TreeDialog.RenameWorkspace -> RenameDialog(

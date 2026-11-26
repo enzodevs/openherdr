@@ -153,6 +153,16 @@ class TopologyProtocolTest {
     }
 
     @Test
+    fun `a split returns the new pane and keeps the PC's focus`() {
+        val split = """{"id":"cli:pane:split","result":{"pane":{"agent_status":"unknown","cwd":"/tmp","focused":false,"foreground_cwd":"/tmp","pane_id":"w1:p2JA","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":21},"tab_id":"w1:t6R","terminal_id":"term_66134ab9af696bd","workspace_id":"w1"},"type":"pane_info"}}"""
+        assertEquals("w1:p2JA", HerdrProtocol.splitPaneId(HerdrProtocol.decodeResult(split)))
+        assertEquals(
+            """{"target_pane_id":"w1:p1","direction":"down","cwd":"/tmp","focus":false}""",
+            HerdrProtocol.splitParams("w1:p1", "down", "/tmp").toString(),
+        )
+    }
+
+    @Test
     fun `renaming a pane to nothing sends an explicit null`() {
         assertEquals("""{"pane_id":"w1:p1","label":null}""", HerdrProtocol.renamePaneParams("w1:p1", null).toString())
         assertEquals("""{"pane_id":"w1:p1","label":"api"}""", HerdrProtocol.renamePaneParams("w1:p1", "api").toString())

@@ -23,20 +23,25 @@ import dev.cambraia.openherdr.protocol.Ansi
 import dev.cambraia.openherdr.protocol.TermColor
 
 /**
- * Graphite: one cool-tinted neutral in four lightness steps, a near-white primary, and color
- * reserved for agent status so "needs you" is the loudest thing on screen.
+ * Graphite: one cool-tinted neutral, a near-white primary, and color reserved for agent status so
+ * "needs you" is the loudest thing on screen.
+ *
+ * The neutrals are one OKLCH hue (270) at one chroma (0.006), stepped in lightness only, so no
+ * step looks more purple than the next. The page sits at L 0.205, a dark gray rather than black,
+ * and each surface is about 0.035 lighter than the one below, enough to read as a layer. Every
+ * text color passes WCAG AA (4.5:1) on every surface it is used on, [faint] included.
  */
 object Graphite {
-    val page = Color(0xFF0F1012)
-    val surface = Color(0xFF16171A)
-    val raised = Color(0xFF1D1E22)
-    val high = Color(0xFF25262B)
-    val highest = Color(0xFF2E2F35)
+    val page = Color(0xFF16171A)      // L 0.205
+    val surface = Color(0xFF1D1E21)   // L 0.235
+    val raised = Color(0xFF252629)    // L 0.268
+    val high = Color(0xFF2E2F32)      // L 0.305
+    val highest = Color(0xFF38393C)   // L 0.345
     val hairline = Color(0x14FFFFFF)
-    val outline = Color(0xFF3A3B42)
-    val text = Color(0xFFEDEDF0)
-    val muted = Color(0xFF9D9EA6)
-    val faint = Color(0xFF6C6D75)
+    val outline = Color(0xFF494A4E)   // L 0.41
+    val text = Color(0xFFEFF0F3)      // L 0.955, 15.7:1 on page
+    val muted = Color(0xFFAFB1B5)     // L 0.76, 8.3:1 on page
+    val faint = Color(0xFF919296)     // L 0.66, 5.8:1 on page, 4.9:1 on raised
 
     val needsYou = Color(0xFFFF8F7A)
     val working = Color(0xFF8CC4FF)

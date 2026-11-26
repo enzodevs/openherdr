@@ -66,6 +66,10 @@ class HerdrClient(
     suspend fun createTab(workspaceId: String, label: String?): String =
         HerdrProtocol.rootPaneId(call("tab.create", HerdrProtocol.createTabParams(workspaceId, label)))
 
+    /** Splits [targetPaneId] ("right" or "down") and returns the new pane. */
+    suspend fun splitPane(targetPaneId: String, direction: String, cwd: String?): String =
+        HerdrProtocol.splitPaneId(call("pane.split", HerdrProtocol.splitParams(targetPaneId, direction, cwd)))
+
     suspend fun renameWorkspace(workspaceId: String, label: String) {
         call("workspace.rename", HerdrProtocol.renameWorkspaceParams(workspaceId, label))
     }

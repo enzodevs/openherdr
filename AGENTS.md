@@ -81,6 +81,11 @@ lands in the user's real session. Clean up afterwards: `herdr --session ohdev se
 - Key names for `pane.send_keys`: `enter esc tab shift+tab up down left right backspace ctrl+c` (no `pageup`).
 - Material 3 is pinned to 1.5.0-beta01 above the Compose BOM for the Expressive APIs (`MaterialShapes`,
   `LoadingIndicator`, button `shapes`). In 1.5, `RoundedPolygon.toShape()` is `@Composable`; do not wrap it in `remember`.
-- Visual identity "Graphite" (`ui/Theme.kt`): always dark, one cool neutral in four steps, near-white primary, color
-  only for agent status. Unbounded for headings, Geist for text, Geist Mono for code (bundled, OFL, `licenses/`).
+- Visual identity "Graphite" (`ui/Theme.kt`): always dark, near-white primary, color only for agent status. The
+  neutrals are one OKLCH hue (270) at chroma 0.006, stepped in lightness only (page L 0.205, each surface ~0.035
+  lighter); every text color keeps WCAG AA (4.5:1) on the surfaces it sits on. Derive new steps in OKLCH, not by eye.
+- Home hierarchy: tabs are the prominent sections, the workspace is a quiet label above them; both fold. New panes
+  are `pane.split` on the tab's last pane with `focus: false`.
+- Session files hold whole messages, so the chat cannot stream: new replies wipe in (`Modifier.reveal`) and a
+  "Working" row shows while the agent's status is working. Unbounded for headings, Geist for text, Geist Mono for code (bundled, OFL, `licenses/`).
 - Tests ship with the code. Run the mutation spot-checks for security-relevant logic (pinning, signatures).

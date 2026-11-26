@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
@@ -130,59 +129,64 @@ fun Overflow(description: String, actions: List<MenuAction>) {
     }
 }
 
+/**
+ * A workspace is the quiet level: a small label that groups its tabs. Most servers have one or
+ * two workspaces and many tabs, so the tabs get the weight and the workspace stays out of the way.
+ */
 @Composable
 fun WorkspaceHeader(node: WorkspaceNode, modifier: Modifier = Modifier, collapsed: Boolean, onToggle: () -> Unit, actions: List<MenuAction>) {
-    val tabs = node.tabs.size
-    val panes = node.panes.size
     val turn by animateFloatAsState(if (collapsed) 0f else 90f, label = "fold")
     Row(
-        modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(16.dp))
+        modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(12.dp))
             .clickable(onClickLabel = if (collapsed) "Expand workspace" else "Collapse workspace", onClick = onToggle)
-            .padding(start = 4.dp, top = 8.dp, bottom = 4.dp),
+            .padding(start = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Glyphs.Chevron, contentDescription = null, tint = Graphite.muted, modifier = Modifier.padding(end = 6.dp).size(20.dp).rotate(turn))
-        node.status?.let { Dot(it.hue(), 8.dp, Modifier.padding(end = 10.dp)) }
-        Column(Modifier.weight(1f)) {
-            Text(node.title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(
-                "${plural(tabs, "tab")} · ${plural(panes, "pane")}",
-                style = MaterialTheme.typography.labelMedium,
-                color = Graphite.muted,
-            )
+        Icon(Glyphs.Chevron, contentDescription = null, tint = Graphite.faint, modifier = Modifier.padding(end = 6.dp).size(16.dp).rotate(turn))
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            node.title.uppercase(),
+            style = MaterialTheme.typography.labelMedium,
+            color = Graphite.muted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Text(
+            "  ·  ${plural(node.tabs.size, "tab")}  ·  ${plural(node.panes.size, "pane")}",
+            style = MaterialTheme.typography.labelMedium,
+            color = Graphite.faint,
+            maxLines = 1,
+        )
+        if (collapsed) node.status?.let { Dot(it.hue(), 6.dp, Modifier.padding(start = 10.dp)) }
         }
         Overflow("Workspace ${node.title} actions", actions)
     }
 }
 
+/** A tab is the section the user thinks in: a title, how many panes, and its status when folded. */
 @Composable
 fun TabHeader(node: TabNode, modifier: Modifier = Modifier, collapsed: Boolean, onToggle: () -> Unit, actions: List<MenuAction>) {
     val turn by animateFloatAsState(if (collapsed) 0f else 90f, label = "fold")
     Row(
-        modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        modifier.fillMaxWidth().padding(top = 6.dp).clip(RoundedCornerShape(14.dp))
             .clickable(onClickLabel = if (collapsed) "Expand tab" else "Collapse tab", onClick = onToggle)
-            .padding(start = 4.dp),
+            .padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Glyphs.Chevron, contentDescription = null, tint = Graphite.faint, modifier = Modifier.padding(end = 6.dp).size(16.dp).rotate(turn))
+        Icon(Glyphs.Chevron, contentDescription = null, tint = Graphite.muted, modifier = Modifier.padding(end = 6.dp).size(20.dp).rotate(turn))
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
         Text(
-            node.title.uppercase(),
-            style = MaterialTheme.typography.labelMedium,
-            color = Graphite.faint,
+            node.title,
+            style = MaterialTheme.typography.titleMedium,
+            color = Graphite.text,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = !collapsed || node.panes.isEmpty()),
+            modifier = Modifier.weight(1f, fill = false),
         )
-        // Folded, the header still says how much is inside and whether anything there wants attention.
-        if (collapsed && node.panes.isNotEmpty()) {
-            Text(
-                "  ·  ${plural(node.panes.size, "pane")}",
-                style = MaterialTheme.typography.labelMedium,
-                color = Graphite.faint,
-                maxLines = 1,
-            )
-            node.panes.mapNotNull { it.agent?.status }.minByOrNull { it.attentionRank }?.let { Dot(it.hue(), 6.dp, Modifier.padding(start = 10.dp)) }
-            Spacer(Modifier.weight(1f))
+        Text("  ${node.panes.size}", style = MaterialTheme.typography.labelMedium, color = Graphite.faint, maxLines = 1)
+        // Folded, the header still says whether anything inside wants attention.
+        if (collapsed) node.panes.mapNotNull { it.agent?.status }.minByOrNull { it.attentionRank }?.let { Dot(it.hue(), 8.dp, Modifier.padding(start = 10.dp)) }
         }
         Overflow("Tab ${node.title} actions", actions)
     }

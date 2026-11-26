@@ -84,6 +84,10 @@ object HerdrProtocol {
     fun rootPaneId(result: JsonObject): String =
         (result["root_pane"] as? JsonObject)?.string("pane_id") ?: throw HerdrException("malformed_response", "missing root_pane")
 
+    /** The new pane of a `pane.split` result. */
+    fun splitPaneId(result: JsonObject): String =
+        (result["pane"] as? JsonObject)?.string("pane_id") ?: throw HerdrException("malformed_response", "missing pane")
+
     fun paneRead(result: JsonObject): PaneRead =
         json.decodeFromJsonElement(PaneRead.serializer(), result["read"] ?: result)
 
@@ -134,6 +138,14 @@ object HerdrProtocol {
     fun createTabParams(workspaceId: String, label: String?): JsonObject = buildJsonObject {
         put("workspace_id", workspaceId)
         label?.let { put("label", it) }
+        put("focus", false)
+    }
+
+    /** A new pane beside [targetPaneId], in the same tab, without taking the PC's focus. */
+    fun splitParams(targetPaneId: String, direction: String, cwd: String?): JsonObject = buildJsonObject {
+        put("target_pane_id", targetPaneId)
+        put("direction", direction)
+        cwd?.let { put("cwd", it) }
         put("focus", false)
     }
 

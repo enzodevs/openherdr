@@ -16,7 +16,17 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -373,7 +383,7 @@ fun AgentScreen(
                     label = "mode",
                 ) { chatMode ->
                     if (chatMode) {
-                        ChatView(chat, answered, onAnswer = ::answer, onOpenTerminal = { mode = 1 }, sent = sent)
+                        ChatView(chat, answered, onAnswer = ::answer, onOpenTerminal = { mode = 1 }, sent = sent, working = agent?.status == AgentStatus.Working)
                     } else {
                         TerminalView(output)
                     }
@@ -500,6 +510,7 @@ private fun ChatView(
     onAnswer: (ChatItem.Question, Int) -> Unit,
     onOpenTerminal: () -> Unit,
     sent: Int,
+    working: Boolean,
 ) {
     when (state) {
         ChatState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator() }
@@ -519,15 +530,21 @@ private fun ChatView(
                 snapshotFlow { list.isScrollInProgress }.collect { scrolling -> if (!scrolling) follow = !list.canScrollForward }
             }
             LaunchedEffect(sent) { follow = true }
+            val last = items.lastIndex + if (working) 1 else 0
             // canScrollForward covers content that grows after it is laid out (markdown renders late).
-            LaunchedEffect(items, list.layoutInfo.viewportSize, list.canScrollForward, sent) {
-                if (follow && !list.isScrollInProgress && items.isNotEmpty()) list.scrollToItem(items.lastIndex, Int.MAX_VALUE / 2)
+            LaunchedEffect(items, working, follow, list.layoutInfo.viewportSize, list.canScrollForward, sent) {
+                if (follow && !list.isScrollInProgress && items.isNotEmpty()) list.scrollToItem(last, Int.MAX_VALUE / 2)
             }
+            // Replies that arrive while the chat is open wipe in; the history that was already there does not.
+            val history = remember { items.mapTo(HashSet()) { it.key } }
+            val revealed = remember { HashSet<String>() }
+            val scope = rememberCoroutineScope()
             if (items.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     EmptyState(MaterialShapes.Puffy.toShape(), "No messages yet", "Say something to the agent below.")
                 }
             } else {
+                Box(Modifier.fillMaxSize()) {
                 LazyColumn(
                     state = list,
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
@@ -537,7 +554,10 @@ private fun ChatView(
                     items(items, key = { it.key }, contentType = { it::class }) { item ->
                         when (item) {
                             is ChatItem.User -> UserBubble(item.text)
-                            is ChatItem.Assistant -> AssistantText(item.text)
+                            is ChatItem.Assistant -> AssistantText(
+                                item.text,
+                                if (item.key in history || item.key in revealed) Modifier else Modifier.reveal { revealed += item.key },
+                            )
                             is ChatItem.Thought -> ThoughtRow(item.text)
                             is ChatItem.Tool -> ToolCard(item)
                             is ChatItem.Question -> QuestionCard(
@@ -548,8 +568,62 @@ private fun ChatView(
                             )
                         }
                     }
+                    if (working) item(key = "working", contentType = "working") { WorkingRow() }
+                }
+                AnimatedVisibility(
+                    visible = !follow && list.canScrollForward,
+                    enter = fadeIn(), exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
+                ) {
+                    FilledTonalIconButton(
+                        onClick = {
+                            follow = true
+                            scope.launch { list.animateScrollToItem(last) }
+                        },
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Graphite.highest),
+                        modifier = Modifier.size(40.dp),
+                    ) { Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Go to the latest message") }
+                }
                 }
             }
+        }
+    }
+}
+
+/** The agent is busy: its next message has not been written to the session file yet. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun WorkingRow() {
+    Row(Modifier.padding(start = 4.dp, top = 2.dp).semantics { liveRegion = LiveRegionMode.Polite }, verticalAlignment = Alignment.CenterVertically) {
+        LoadingIndicator(Modifier.size(22.dp), color = Graphite.working)
+        Text("Working", style = MaterialTheme.typography.bodyMedium, color = Graphite.muted, modifier = Modifier.padding(start = 10.dp))
+    }
+}
+
+/**
+ * Session files hold whole messages, so there is nothing to stream. A new reply is wiped in from
+ * the top instead, which reads the same way without pretending the text is still being written.
+ */
+@Composable
+private fun Modifier.reveal(onDone: () -> Unit): Modifier {
+    val progress = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        progress.animateTo(1f, tween(durationMillis = 900, easing = LinearOutSlowInEasing))
+        onDone()
+    }
+    return graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }.drawWithContent {
+        drawContent()
+        val edge = progress.value * 1.2f
+        if (edge < 1.2f) {
+            drawRect(
+                Brush.verticalGradient(
+                    0f to Color.Black,
+                    (edge - 0.2f).coerceIn(0f, 1f) to Color.Black,
+                    edge.coerceIn(0f, 1f) to Color.Transparent,
+                    1f to Color.Transparent,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
         }
     }
 }
@@ -570,7 +644,7 @@ private fun UserBubble(text: String) {
 }
 
 @Composable
-private fun AssistantText(text: String) {
+private fun AssistantText(text: String, modifier: Modifier = Modifier) {
     val type = MaterialTheme.typography
     SelectionContainer {
         Markdown(
@@ -586,7 +660,7 @@ private fun AssistantText(text: String) {
                 bullet = type.bodyLarge, list = type.bodyLarge, ordered = type.bodyLarge,
                 quote = type.bodyLarge.copy(color = Graphite.muted),
             ),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            modifier = modifier.fillMaxWidth().padding(horizontal = 4.dp),
         )
     }
 }
@@ -855,7 +929,8 @@ private fun Composer(
         }
         Column(
             Modifier.padding(horizontal = 12.dp).padding(top = 10.dp).fillMaxWidth()
-                .background(Graphite.raised, RoundedCornerShape(28.dp)).animateContentSize(),
+                .background(Graphite.raised, RoundedCornerShape(28.dp))
+                .border(1.dp, Graphite.hairline, RoundedCornerShape(28.dp)).animateContentSize(),
         ) {
             when (voice) {
                 is DictationState.Recording -> RecordingBar(voice, onPause, onResume, onFinish, onDiscard)
