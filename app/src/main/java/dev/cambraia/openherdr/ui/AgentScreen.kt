@@ -177,7 +177,8 @@ fun AgentScreen(
 ) {
     val agent = node?.agent
     val chatCapable = agent?.let(TranscriptLocator::format) != null
-    var mode by rememberSaveable(paneId) { mutableIntStateOf(if (chatCapable) 0 else 1) }
+    // Keyed on chatCapable too: a shell that becomes an agent opens on its chat.
+    var mode by rememberSaveable(paneId, chatCapable) { mutableIntStateOf(if (chatCapable) 0 else 1) }
     val showChat = mode == 0 && chatCapable
     val blocked = agent?.status == AgentStatus.Blocked
 
@@ -345,16 +346,21 @@ fun AgentScreen(
         }
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             // A reconnect brings a new SFTP session; the feed is rebuilt on it and the chat catches up.
+            // An agent that has not been spoken to yet has no session file; keep looking for it.
             var remote: RemoteFiles? = null
             var feed: ChatFeed? = null
+            var wait = 0
             while (true) {
                 val current = files()
-                if (current != null && current !== remote) {
+                if (current != null && (current !== remote || feed == null) && wait-- <= 0) {
                     val source = withContext(Dispatchers.IO) { runCatching { TranscriptLocator.locate(agent, current) } }
                     if (source.isSuccess) {
                         remote = current
                         feed = source.getOrNull()?.let { ChatFeed(current, it) }
-                        if (feed == null) chat = ChatState.Unavailable("Could not find this conversation's session file on the server.")
+                        if (feed == null) {
+                            chat = ChatState.Unavailable("This conversation has no session file on the server yet. It appears with the agent's first message.")
+                            wait = 3
+                        }
                     }
                 }
                 feed?.let { live ->

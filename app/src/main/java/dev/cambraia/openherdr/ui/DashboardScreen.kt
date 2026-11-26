@@ -195,7 +195,7 @@ fun AgentsTab(
                         item(key = "tab-${tab.tab.id}") {
                             TabHeader(
                                 tab,
-                                Modifier.animateItem(),
+                                Modifier.animateItem().underWorkspace(),
                                 collapsed = tab.tab.id in collapsed,
                                 onToggle = { if (!collapsed.remove(tab.tab.id)) collapsed.add(tab.tab.id) },
                                 actions = listOfNotNull(
@@ -208,7 +208,7 @@ fun AgentsTab(
                             )
                         }
                         if (tab.tab.id !in collapsed) items(tab.panes, key = { it.id }) { node ->
-                            PaneCard(node, snapshot.home, Modifier.animateItem()) { onOpenPane(node.id) }
+                            PaneCard(node, snapshot.home, Modifier.animateItem().underWorkspace()) { onOpenPane(node.id) }
                         }
                     }
                 }
