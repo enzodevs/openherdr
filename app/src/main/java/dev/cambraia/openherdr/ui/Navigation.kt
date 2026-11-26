@@ -22,6 +22,12 @@ class NavViewModel : ViewModel() {
 
     var tab by mutableStateOf(Tab.Agents)
 
+    /** Where the workspace list was scrolled to, so coming back from a pane lands in the same place. */
+    val treeScroll = androidx.compose.foundation.lazy.LazyListState()
+
+    /** Ids of the workspaces and tabs folded down to their header on the home list. */
+    val collapsed = mutableStateListOf<String>()
+
     val current: Screen
         get() = stack.last()
 

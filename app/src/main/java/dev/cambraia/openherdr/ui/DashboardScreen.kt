@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -83,10 +84,13 @@ fun AgentsTab(
     onDeviceKey: () -> Unit,
     onTrust: (Connection.NeedsTrust) -> Unit,
     onDisconnect: () -> Unit,
+    listState: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
+    collapsed: MutableList<String> = remember { mutableStateListOf() },
 ) {
     val profile = connection.activeProfile
     var dialog by remember { mutableStateOf<TreeDialog?>(null) }
     LazyColumn(
+        state = listState,
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = bottomInset),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize(),
@@ -175,6 +179,8 @@ fun AgentsTab(
                         WorkspaceHeader(
                             ws,
                             Modifier.animateItem(),
+                            collapsed = ws.workspace.id in collapsed,
+                            onToggle = { if (!collapsed.remove(ws.workspace.id)) collapsed.add(ws.workspace.id) },
                             actions = listOf(
                                 MenuAction("New tab") { dialog = TreeDialog.NewTab(ws) },
                                 MenuAction("Rename workspace") { dialog = TreeDialog.RenameWorkspace(ws) },
@@ -182,18 +188,20 @@ fun AgentsTab(
                             ),
                         )
                     }
-                    ws.tabs.forEach { tab ->
+                    if (ws.workspace.id !in collapsed) ws.tabs.forEach { tab ->
                         item(key = "tab-${tab.tab.id}") {
                             TabHeader(
                                 tab,
                                 Modifier.animateItem(),
+                                collapsed = tab.tab.id in collapsed,
+                                onToggle = { if (!collapsed.remove(tab.tab.id)) collapsed.add(tab.tab.id) },
                                 actions = listOf(
                                     MenuAction("Rename tab") { dialog = TreeDialog.RenameTab(tab) },
                                     MenuAction("Close tab…", danger = true) { dialog = TreeDialog.CloseTab(tab) },
                                 ),
                             )
                         }
-                        items(tab.panes, key = { it.id }) { node ->
+                        if (tab.tab.id !in collapsed) items(tab.panes, key = { it.id }) { node ->
                             PaneCard(node, snapshot.home, Modifier.animateItem()) { onOpenPane(node.id) }
                         }
                     }

@@ -11,10 +11,10 @@ import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,6 +24,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.io.OutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.sqrt
 
 /** NVIDIA Parakeet TDT 0.6B v3 (int8, sherpa-onnx export): 25 European languages, punctuation, on device. */
@@ -51,24 +56,45 @@ class SpeechModel(val dir: File) {
 sealed interface DictationState {
     data object Unavailable : DictationState
     data object Idle : DictationState
-    data class Recording(val level: Float) : DictationState
-    data object Transcribing : DictationState
+
+    /** A take in progress; [paused] keeps what was said so far and frees the microphone. */
+    data class Recording(val level: Float, val seconds: Int, val paused: Boolean) : DictationState
+
+    /** Piece [done] of [total] is being recognized; [total] is 0 while the model loads. */
+    data class Transcribing(val done: Int, val total: Int) : DictationState
+
+    /** The take could not be turned into text. Its audio is still on disk: retry, export or discard. */
+    data class Failed(val message: String, val seconds: Int) : DictationState
 }
 
 /**
- * Push-to-talk dictation: [start] records 16 kHz mono audio, [stop] transcribes it with
- * Parakeet and returns the text. Nothing leaves the phone. The recognizer (~700 MB of RAM)
- * loads while the user is still speaking and is dropped by [release] when the UI is hidden.
+ * Dictation that does not lose what was said. [start] records 16 kHz mono audio straight to a
+ * file, so the take survives the app being killed; [pause] and [resume] extend the same take;
+ * [finish] recognizes it with Parakeet in pieces and hands the text to [onText]. A take that
+ * cannot be recognized stays on disk as [DictationState.Failed] until the user retries, exports
+ * or discards it. Nothing leaves the phone. The recognizer (~700 MB of RAM) loads while the user
+ * is still speaking and is dropped by [release] when the UI is hidden.
  */
 class Dictation(private val context: Context, private val scope: CoroutineScope) {
-    private val _state = MutableStateFlow<DictationState>(DictationState.Idle)
+    /** Receives the text of a finished take, with the tag given to [start]. Called off the main thread. */
+    var onText: (tag: String, text: String) -> Unit = { _, _ -> }
+
+    private val dir = File(context.filesDir, "dictation")
+    private val audio = File(dir, "take.pcm")
+    private val tagFile = File(dir, "take.tag")
+
+    private val _state = MutableStateFlow(
+        // A take left behind by a killed process comes back as something to retry or export.
+        if (audio.length() > 0) DictationState.Failed("The app closed before this recording was transcribed.", seconds()) else DictationState.Idle,
+    )
     val state: StateFlow<DictationState> = _state.asStateFlow()
 
+    private val control = Mutex()
     private val loadLock = Mutex()
     private var recognizer: OfflineRecognizer? = null
-    private var loading: Deferred<OfflineRecognizer>? = null
     private var recording: Job? = null
-    private val samples = FloatBuffer()
+
+    private fun seconds(): Int = (audio.length() / 2 / SAMPLE_RATE).toInt()
 
     fun refresh() {
         if (_state.value is DictationState.Idle || _state.value is DictationState.Unavailable) {
@@ -76,85 +102,167 @@ class Dictation(private val context: Context, private val scope: CoroutineScope)
         }
     }
 
-    /** Requires RECORD_AUDIO. */
-    @SuppressLint("MissingPermission")
-    fun start() {
+    /** Starts a new take whose text goes to [tag]. Requires RECORD_AUDIO. */
+    fun start(tag: String) = command {
         val model = SpeechModel.locate(context)
         if (!model.installed) {
             _state.value = DictationState.Unavailable
-            return
+            return@command
         }
-        if (recording != null) return
-        loading = scope.async(Dispatchers.Default) { recognizer(model) }
-        samples.clear()
-        _state.value = DictationState.Recording(0f)
-        recording = scope.launch(Dispatchers.IO) {
-            val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT)
-            val record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT, maxOf(minBuffer, SAMPLE_RATE / 5 * 4),
-            )
-            val chunk = FloatArray(SAMPLE_RATE / 20)
-            try {
-                record.startRecording()
-                while (isActive && samples.size < MAX_SECONDS * SAMPLE_RATE) {
-                    val n = record.read(chunk, 0, chunk.size, AudioRecord.READ_BLOCKING)
-                    if (n <= 0) continue
-                    samples.add(chunk, n)
-                    _state.value = DictationState.Recording(rms(chunk, n))
-                }
-            } finally {
-                record.stop()
-                record.release()
-            }
-        }
+        if (_state.value != DictationState.Idle) return@command
+        dir.mkdirs()
+        audio.delete()
+        tagFile.writeText(tag)
+        scope.launch(Dispatchers.Default) { runCatching { recognizer(model) } }
+        capture()
     }
 
-    /** Stops recording and returns the transcript (empty when nothing was understood). */
-    suspend fun stop(): String {
-        val job = recording ?: return ""
-        recording = null
-        job.cancel()
-        job.join()
-        if (samples.size < SAMPLE_RATE / 4) {
-            _state.value = DictationState.Idle
-            return ""
-        }
-        _state.value = DictationState.Transcribing
-        return try {
-            val engine = loading!!.await()
-            withContext(Dispatchers.Default) {
-                val stream = engine.createStream()
-                try {
-                    stream.acceptWaveform(samples.toArray(), SAMPLE_RATE)
-                    engine.decode(stream)
-                    engine.getResult(stream).text.trim()
-                } finally {
-                    stream.release()
-                }
-            }
-        } finally {
-            samples.clear()
-            _state.value = DictationState.Idle
-        }
+    fun pause() = command {
+        if ((_state.value as? DictationState.Recording)?.paused != false) return@command
+        stopCapture()
+        _state.value = DictationState.Recording(0f, seconds(), paused = true)
     }
 
-    fun cancel() {
-        recording?.cancel()
-        recording = null
-        samples.clear()
-        if (_state.value !is DictationState.Unavailable) _state.value = DictationState.Idle
+    fun resume() = command {
+        if ((_state.value as? DictationState.Recording)?.paused == true && seconds() < MAX_SECONDS) capture()
+    }
+
+    /** Ends the take and transcribes it; the text arrives through [onText]. */
+    fun finish() = command {
+        if (_state.value is DictationState.Recording) transcribe()
+    }
+
+    /** Tries again to transcribe a take that failed. */
+    fun retry() = command {
+        if (_state.value is DictationState.Failed) transcribe()
+    }
+
+    /** Throws the current take away. */
+    fun discard() = command {
+        if (_state.value is DictationState.Transcribing) return@command
+        stopCapture()
+        clear()
+        _state.value = DictationState.Idle
+        refresh()
+    }
+
+    /** Writes the kept take as a WAV file. Blocking. */
+    fun export(out: OutputStream) {
+        val bytes = audio.length()
+        out.write(AudioSegments.wavHeader(bytes, SAMPLE_RATE))
+        audio.inputStream().use { it.copyTo(out) }
     }
 
     /** Frees the model's memory; it reloads on the next [start]. */
     fun release() {
-        if (recording != null || _state.value == DictationState.Transcribing) return
+        if (_state.value != DictationState.Idle && _state.value != DictationState.Unavailable) return
         scope.launch {
             loadLock.withLock {
                 recognizer?.release()
                 recognizer = null
-                loading = null
             }
+        }
+    }
+
+    /** Control calls run one at a time, in order, off the caller's thread. */
+    private fun command(block: suspend () -> Unit) {
+        scope.launch(Dispatchers.IO) { control.withLock { block() } }
+    }
+
+    private suspend fun stopCapture() {
+        recording?.cancelAndJoin()
+        recording = null
+    }
+
+    private fun clear() {
+        audio.delete()
+        tagFile.delete()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun capture() {
+        _state.value = DictationState.Recording(0f, seconds(), paused = false)
+        recording = scope.launch(Dispatchers.IO) {
+            var full = false
+            try {
+                val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+                val record = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuffer, SAMPLE_RATE * 2),
+                )
+                val chunk = ShortArray(SAMPLE_RATE / 20)
+                val bytes = ByteBuffer.allocate(chunk.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+                try {
+                    if (record.state != AudioRecord.STATE_INITIALIZED) throw IOException("The microphone is not available")
+                    // Unbuffered appends: every 50 ms of speech is on disk before the next is read.
+                    FileOutputStream(audio, true).use { out ->
+                        var written = audio.length() / 2
+                        record.startRecording()
+                        while (isActive && !full) {
+                            val n = record.read(chunk, 0, chunk.size)
+                            if (n < 0) throw IOException("The microphone stopped ($n)")
+                            if (n == 0) continue
+                            bytes.clear()
+                            bytes.asShortBuffer().put(chunk, 0, n)
+                            out.write(bytes.array(), 0, n * 2)
+                            written += n
+                            full = written >= MAX_SECONDS.toLong() * SAMPLE_RATE
+                            _state.value = DictationState.Recording(rms(chunk, n), (written / SAMPLE_RATE).toInt(), paused = false)
+                        }
+                    }
+                } finally {
+                    runCatching { record.stop() }
+                    record.release()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The microphone was lost: keep what was recorded and let the user decide.
+                _state.value = DictationState.Recording(0f, seconds(), paused = true)
+            }
+            // At the limit the take is transcribed without waiting for the user.
+            if (full) finish()
+        }
+    }
+
+    private suspend fun transcribe() {
+        stopCapture()
+        val length = seconds()
+        if (audio.length() < SAMPLE_RATE / 4 * 2) {
+            clear()
+            _state.value = DictationState.Idle
+            return
+        }
+        _state.value = DictationState.Transcribing(0, 0)
+        try {
+            val engine = recognizer(SpeechModel.locate(context))
+            val text = withContext(Dispatchers.Default) {
+                val samples = AudioSegments.floats(audio.readBytes())
+                val pieces = AudioSegments.split(samples, SAMPLE_RATE)
+                pieces.mapIndexed { index, piece ->
+                    _state.value = DictationState.Transcribing(index, pieces.size)
+                    val stream = engine.createStream()
+                    try {
+                        stream.acceptWaveform(samples.copyOfRange(piece.first, piece.last + 1), SAMPLE_RATE)
+                        engine.decode(stream)
+                        engine.getResult(stream).text.trim()
+                    } finally {
+                        stream.release()
+                    }
+                }.filter { it.isNotEmpty() }.joinToString(" ")
+            }
+            if (text.isEmpty()) {
+                _state.value = DictationState.Failed("No speech was recognized in this recording.", length)
+                return
+            }
+            onText(runCatching { tagFile.readText() }.getOrDefault(""), text)
+            clear()
+            _state.value = DictationState.Idle
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            // Includes running out of memory: the audio file is untouched either way.
+            _state.value = DictationState.Failed(e.message?.takeIf { it.isNotBlank() } ?: "Transcription failed.", length)
         }
     }
 
@@ -177,31 +285,16 @@ class Dictation(private val context: Context, private val scope: CoroutineScope)
         ).also { recognizer = it }
     }
 
-    private fun rms(chunk: FloatArray, n: Int): Float {
+    private fun rms(chunk: ShortArray, n: Int): Float {
         var sum = 0.0
-        for (i in 0 until n) sum += chunk[i] * chunk[i]
+        for (i in 0 until n) sum += (chunk[i] / 32768.0).let { it * it }
         return sqrt(sum / n).toFloat()
-    }
-
-    /** A growable float array, so long dictations do not box every sample. */
-    private class FloatBuffer {
-        private var data = FloatArray(SAMPLE_RATE * 10)
-        @Volatile var size = 0
-            private set
-
-        @Synchronized fun add(chunk: FloatArray, n: Int) {
-            if (size + n > data.size) data = data.copyOf(maxOf(data.size * 2, size + n))
-            System.arraycopy(chunk, 0, data, size, n)
-            size += n
-        }
-
-        @Synchronized fun toArray(): FloatArray = data.copyOf(size)
-
-        @Synchronized fun clear() { size = 0 }
     }
 
     companion object {
         const val SAMPLE_RATE = 16_000
-        private const val MAX_SECONDS = 300
+
+        /** Ten minutes: long enough for a spoken brief, short enough to transcribe in a couple of minutes. */
+        const val MAX_SECONDS = 600
     }
 }

@@ -21,9 +21,19 @@ class ChatLogTest {
                 ChatItem.Tool("tool-toolu_fixture1", "Bash", "./gradlew test", output = "BUILD SUCCESSFUL"),
                 ChatItem.Thought("i1", "Check the session handling"),
                 ChatItem.Assistant("i2", "Fixed. **All tests pass.**"),
+                // Typed while the agent was working: recorded as a queued command, not as a user line.
+                ChatItem.User("i3", "Also update the changelog"),
             ),
             items,
         )
+    }
+
+    @Test
+    fun claudeKeepsPromptsThatStartWithAnAngleBracket() {
+        val log = ChatLog(TranscriptFormat.Claude)
+        log.append("""{"type":"user","message":{"role":"user","content":"<div> is not closed in index.html"}}""")
+        log.append("""{"type":"user","message":{"role":"user","content":"<system-reminder>internal</system-reminder>"}}""")
+        assertEquals(listOf(ChatItem.User("i0", "<div> is not closed in index.html")), log.snapshot())
     }
 
     @Test

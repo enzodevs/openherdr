@@ -6,7 +6,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 
-/** Read-only access to files on the herdr host (SFTP). Blocking. */
+/** Files on the herdr host (SFTP): reads for conversations, one write for attachments. Blocking. */
 interface RemoteFiles {
     val home: String
 
@@ -17,6 +17,9 @@ interface RemoteFiles {
 
     /** Entry names in [dir]; empty when it does not exist. */
     fun list(dir: String): List<String>
+
+    /** Stores [bytes] in a private temporary folder on the host and returns the file's path. */
+    fun upload(name: String, bytes: ByteArray): String = throw UnsupportedOperationException("Uploads are not supported")
 }
 
 data class TranscriptSource(val format: TranscriptFormat, val path: String)

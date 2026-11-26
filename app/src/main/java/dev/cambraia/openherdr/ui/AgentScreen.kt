@@ -1,7 +1,11 @@
 package dev.cambraia.openherdr.ui
 
 import android.Manifest
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -45,6 +49,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.platform.LocalConfiguration
+import dev.cambraia.openherdr.data.Drafts
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -76,6 +89,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -141,6 +155,9 @@ fun AgentScreen(
     revision: Long,
     files: () -> RemoteFiles?,
     dictation: Dictation,
+    drafts: Drafts,
+    draftKey: String,
+    online: Boolean,
     read: suspend (String) -> PaneRead,
     submit: suspend (String, String) -> Unit,
     sendKeys: suspend (String, List<String>) -> Unit,
@@ -156,7 +173,12 @@ fun AgentScreen(
 
     var output by remember { mutableStateOf("") }
     var chat by remember { mutableStateOf<ChatState>(ChatState.Loading) }
-    var draft by rememberSaveable { mutableStateOf("") }
+    // The draft lives outside the screen: it outlasts navigation, a lost link and the process.
+    val draft = drafts[draftKey]
+    var expanded by rememberSaveable(paneId) { mutableStateOf(false) }
+    var sending by remember { mutableStateOf(false) }
+    var sent by remember { mutableIntStateOf(0) }
+    var attaching by remember { mutableStateOf(false) }
     var keysOpen by rememberSaveable { mutableStateOf(false) }
     var confirmInterrupt by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
@@ -211,38 +233,78 @@ fun AgentScreen(
         }
     }
 
+    // The draft is cleared only once the server took it, so a dead link never eats a prompt.
     fun send() {
         val text = draft.trim()
-        if (text.isEmpty()) return
-        draft = ""
-        act { submit(paneId, text) }
-    }
-
-    fun toggleVoice() {
-        when (voice) {
-            is DictationState.Recording -> scope.launch {
-                haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                runCatching { dictation.stop() }
-                    .onSuccess { heard -> if (heard.isNotEmpty()) draft = listOf(draft.trimEnd(), heard).filter { it.isNotEmpty() }.joinToString(" ") }
-                    .onFailure { snackbar.showSnackbar("Transcription failed: ${it.message}") }
-            }
-            DictationState.Transcribing -> Unit
-            DictationState.Unavailable -> scope.launch { snackbar.showSnackbar("Speech model not installed. See Settings → Voice.") }
-            DictationState.Idle -> {
-                haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
-                dictation.start()
-            }
+        if (text.isEmpty() || sending) return
+        sending = true
+        haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+        scope.launch {
+            val result = runCatching { submit(paneId, text) }
+            sending = false
+            result.onSuccess {
+                if (drafts[draftKey].trim() == text) drafts[draftKey] = ""
+                sent++
+                expanded = false
+                delay(250)
+                reload()
+            }.onFailure { snackbar.showSnackbar("Not sent, your text is still here. ${it.message ?: ""}".trim()) }
         }
     }
 
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) toggleVoice() else scope.launch { snackbar.showSnackbar("Microphone permission is needed for dictation") }
+        if (granted) dictation.start(draftKey) else scope.launch { snackbar.showSnackbar("Microphone permission is needed for dictation") }
     }
 
     fun onMic() {
-        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (granted || voice !is DictationState.Idle) toggleVoice() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        when (voice) {
+            DictationState.Unavailable -> scope.launch { snackbar.showSnackbar("Speech model not installed. See Settings → Voice.") }
+            DictationState.Idle -> {
+                haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+                val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                if (granted) dictation.start(draftKey) else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
+            else -> Unit
+        }
     }
+
+    val exportTake = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/wav")) { uri ->
+        if (uri != null) scope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                runCatching { context.contentResolver.openOutputStream(uri)!!.use(dictation::export) }
+            }
+            snackbar.showSnackbar(if (saved.isSuccess) "Recording saved" else "Could not save the recording: ${saved.exceptionOrNull()?.message}")
+        }
+    }
+
+    // A long dictation lands in the big editor, ready to be reviewed.
+    var transcribing by remember { mutableStateOf(false) }
+    LaunchedEffect(voice) {
+        if (transcribing && voice == DictationState.Idle && draft.length > 160) expanded = true
+        transcribing = voice is DictationState.Transcribing
+    }
+
+    // Attachments are copied to the server and referenced by path, which is what an agent can open.
+    fun attach(uri: Uri?) {
+        if (uri == null || attaching) return
+        attaching = true
+        scope.launch {
+            val path = withContext(Dispatchers.IO) {
+                runCatching {
+                    val remote = files() ?: error("Not connected")
+                    val type = context.contentResolver.getType(uri)
+                    val bytes = context.contentResolver.openInputStream(uri)!!.use { it.readNBytes(MAX_ATTACHMENT + 1) }
+                    if (bytes.size > MAX_ATTACHMENT) error("Larger than ${MAX_ATTACHMENT / 1_000_000} MB")
+                    remote.upload("attachment." + (MimeTypeMap.getSingleton().getExtensionFromMimeType(type) ?: "bin"), bytes)
+                }
+            }
+            attaching = false
+            path.onSuccess { drafts.append(draftKey, it) }
+                .onFailure { snackbar.showSnackbar("Could not attach: ${it.message}") }
+        }
+    }
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia(), ::attach)
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.GetContent(), ::attach)
 
     LaunchedEffect(Unit) { dictation.refresh() }
 
@@ -272,16 +334,23 @@ fun AgentScreen(
             return@LaunchedEffect
         }
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            val remote = files() ?: return@repeatOnLifecycle
-            val source = withContext(Dispatchers.IO) { runCatching { TranscriptLocator.locate(agent, remote) }.getOrNull() }
-            if (source == null) {
-                chat = ChatState.Unavailable("Could not find this conversation's session file on the server.")
-                return@repeatOnLifecycle
-            }
-            val feed = ChatFeed(remote, source)
+            // A reconnect brings a new SFTP session; the feed is rebuilt on it and the chat catches up.
+            var remote: RemoteFiles? = null
+            var feed: ChatFeed? = null
             while (true) {
-                withContext(Dispatchers.IO) { runCatching { feed.poll() } }
-                    .onSuccess { items -> items?.let { chat = ChatState.Ready(it) } }
+                val current = files()
+                if (current != null && current !== remote) {
+                    val source = withContext(Dispatchers.IO) { runCatching { TranscriptLocator.locate(agent, current) } }
+                    if (source.isSuccess) {
+                        remote = current
+                        feed = source.getOrNull()?.let { ChatFeed(current, it) }
+                        if (feed == null) chat = ChatState.Unavailable("Could not find this conversation's session file on the server.")
+                    }
+                }
+                feed?.let { live ->
+                    withContext(Dispatchers.IO) { runCatching { live.poll() } }
+                        .onSuccess { items -> items?.let { chat = ChatState.Ready(it) } }
+                }
                 delay(1_200)
             }
         }
@@ -304,7 +373,7 @@ fun AgentScreen(
                     label = "mode",
                 ) { chatMode ->
                     if (chatMode) {
-                        ChatView(chat, answered, onAnswer = ::answer, onOpenTerminal = { mode = 1 })
+                        ChatView(chat, answered, onAnswer = ::answer, onOpenTerminal = { mode = 1 }, sent = sent)
                     } else {
                         TerminalView(output)
                     }
@@ -324,15 +393,33 @@ fun AgentScreen(
 
             Composer(
                 draft = draft,
-                onDraft = { draft = it },
+                onDraft = { drafts[draftKey] = it },
                 voice = voice,
                 placeholder = if (agent != null) "Message the agent" else "Run a command",
+                sendOnEnter = agent == null,
+                expanded = expanded,
+                onExpanded = { expanded = it },
+                online = online,
+                sending = sending,
+                attaching = attaching,
                 keysOpen = keysOpen || !showChat,
                 canToggleKeys = showChat,
                 onToggleKeys = { keysOpen = !keysOpen },
                 onKeys = { keys -> act { sendKeys(paneId, keys) } },
                 onInterrupt = { confirmInterrupt = true },
                 onMic = ::onMic,
+                onPause = dictation::pause,
+                onResume = dictation::resume,
+                onFinish = {
+                    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+                    dictation.finish()
+                },
+                onDiscard = dictation::discard,
+                onRetry = dictation::retry,
+                onExport = { exportTake.launch("dictation.wav") },
+                onPhoto = { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                onFile = { pickFile.launch("*/*") },
+                onPaste = { attach(clipboardImage(context)) },
                 onSend = ::send,
             )
         }
@@ -412,6 +499,7 @@ private fun ChatView(
     answered: Set<String>,
     onAnswer: (ChatItem.Question, Int) -> Unit,
     onOpenTerminal: () -> Unit,
+    sent: Int,
 ) {
     when (state) {
         ChatState.Loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIndicator() }
@@ -423,16 +511,17 @@ private fun ChatView(
         is ChatState.Ready -> {
             val items = state.items
             val list = rememberLazyListState()
-            var settled by remember { mutableStateOf(false) }
-            LaunchedEffect(items.size) {
-                if (items.isEmpty()) return@LaunchedEffect
-                val atBottom = list.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= list.layoutInfo.totalItemsCount - 3 } ?: true
-                if (!settled) {
-                    list.scrollToItem(items.lastIndex)
-                    settled = true
-                } else if (atBottom) {
-                    list.animateScrollToItem(items.lastIndex)
-                }
+            // The chat follows its end until the user scrolls away from it, and again once they come
+            // back or send something. Judged when a scroll settles, not when content arrives: the
+            // keyboard opening or a long reply would otherwise look like "the user scrolled up".
+            var follow by remember { mutableStateOf(true) }
+            LaunchedEffect(list) {
+                snapshotFlow { list.isScrollInProgress }.collect { scrolling -> if (!scrolling) follow = !list.canScrollForward }
+            }
+            LaunchedEffect(sent) { follow = true }
+            // canScrollForward covers content that grows after it is laid out (markdown renders late).
+            LaunchedEffect(items, list.layoutInfo.viewportSize, list.canScrollForward, sent) {
+                if (follow && !list.isScrollInProgress && items.isNotEmpty()) list.scrollToItem(items.lastIndex, Int.MAX_VALUE / 2)
             }
             if (items.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -700,6 +789,21 @@ private fun PromptBanner(excerpt: String?, onKeys: (List<String>) -> Unit) {
     }
 }
 
+private const val MAX_ATTACHMENT = 25_000_000
+
+/** The image the user just copied (a screenshot, usually), or null. */
+private fun clipboardImage(context: Context): Uri? {
+    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip ?: return null
+    if (clip.itemCount == 0 || clip.description?.hasMimeType("image/*") != true) return null
+    return clip.getItemAt(0).uri
+}
+
+private fun clock(seconds: Int): String = "%d:%02d".format(seconds / 60, seconds % 60)
+
+/**
+ * One card: the prompt on top at full width, its actions underneath. While dictating, the card
+ * shows the take instead; the draft underneath is untouched.
+ */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun Composer(
@@ -707,14 +811,30 @@ private fun Composer(
     onDraft: (String) -> Unit,
     placeholder: String,
     voice: DictationState,
+    sendOnEnter: Boolean,
+    expanded: Boolean,
+    onExpanded: (Boolean) -> Unit,
+    online: Boolean,
+    sending: Boolean,
+    attaching: Boolean,
     keysOpen: Boolean,
     canToggleKeys: Boolean,
     onToggleKeys: () -> Unit,
     onKeys: (List<String>) -> Unit,
     onInterrupt: () -> Unit,
     onMic: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onFinish: () -> Unit,
+    onDiscard: () -> Unit,
+    onRetry: () -> Unit,
+    onExport: () -> Unit,
+    onPhoto: () -> Unit,
+    onFile: () -> Unit,
+    onPaste: () -> Unit,
     onSend: () -> Unit,
 ) {
+    val context = LocalContext.current
     Column(Modifier.navigationBarsPadding().padding(bottom = 8.dp)) {
         AnimatedVisibility(keysOpen, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
             Row(
@@ -725,83 +845,207 @@ private fun Composer(
                 KeyButton("Ctrl+C", danger = true, onClick = onInterrupt)
             }
         }
-        Row(Modifier.padding(start = 8.dp, end = 12.dp, top = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (canToggleKeys) {
-                IconButton(onClick = onToggleKeys) {
-                    Icon(Glyphs.Keyboard, contentDescription = if (keysOpen) "Hide keys" else "Show keys", tint = if (keysOpen) Graphite.text else Graphite.muted)
-                }
-            } else {
-                Spacer(Modifier.width(4.dp))
-            }
-            Box(Modifier.weight(1f)) {
-                when (voice) {
-                    is DictationState.Recording -> VoicePill("Listening… tap stop when done", voice.level)
-                    DictationState.Transcribing -> VoicePill("Transcribing on device…", null)
-                    else -> TextField(
+        AnimatedVisibility(!online, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+            Text(
+                "Offline, reconnecting. Your draft is kept and can be sent when the link is back.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Graphite.needsYou,
+                modifier = Modifier.padding(horizontal = 24.dp).padding(top = 10.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+        Column(
+            Modifier.padding(horizontal = 12.dp).padding(top = 10.dp).fillMaxWidth()
+                .background(Graphite.raised, RoundedCornerShape(28.dp)).animateContentSize(),
+        ) {
+            when (voice) {
+                is DictationState.Recording -> RecordingBar(voice, onPause, onResume, onFinish, onDiscard)
+                is DictationState.Transcribing -> TranscribingRow(voice)
+                is DictationState.Failed -> FailedTake(voice, onRetry, onExport, onDiscard)
+                else -> {
+                    TextField(
                         value = draft,
                         onValueChange = onDraft,
                         placeholder = { Text(placeholder) },
-                        maxLines = 6,
+                        maxLines = if (expanded) Int.MAX_VALUE else 5,
                         shape = RoundedCornerShape(28.dp),
                         colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Graphite.raised,
-                            unfocusedContainerColor = Graphite.raised,
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
                             focusedIndicatorColor = Color.Transparent,
                             unfocusedIndicatorColor = Color.Transparent,
                             disabledIndicatorColor = Color.Transparent,
                         ),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send, capitalization = KeyboardCapitalization.Sentences),
+                        // Prompts are reviewed and may span lines, so Enter sends only in plain terminals.
+                        keyboardOptions = KeyboardOptions(
+                            imeAction = if (sendOnEnter) ImeAction.Send else ImeAction.Default,
+                            capitalization = if (sendOnEnter) KeyboardCapitalization.None else KeyboardCapitalization.Sentences,
+                        ),
                         keyboardActions = KeyboardActions(onSend = { onSend() }),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth()
+                            .then(if (expanded) Modifier.height((LocalConfiguration.current.screenHeightDp * 0.36f).dp) else Modifier),
                     )
+                    Row(Modifier.padding(start = 4.dp, end = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (canToggleKeys) {
+                            IconButton(onClick = onToggleKeys) {
+                                Icon(Glyphs.Keyboard, contentDescription = if (keysOpen) "Hide keys" else "Show keys", tint = if (keysOpen) Graphite.text else Graphite.muted)
+                            }
+                        }
+                        var menu by remember { mutableStateOf(false) }
+                        var pasteable by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(
+                                onClick = {
+                                    pasteable = clipboardImage(context) != null
+                                    menu = true
+                                },
+                                enabled = online && !attaching,
+                            ) {
+                                if (attaching) LoadingIndicator(Modifier.size(22.dp)) else Icon(Icons.Default.Add, contentDescription = "Attach", tint = Graphite.muted)
+                            }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = Graphite.high) {
+                                if (pasteable) DropdownMenuItem(text = { Text("Paste copied image") }, onClick = { menu = false; onPaste() })
+                                DropdownMenuItem(text = { Text("Photo or screenshot") }, onClick = { menu = false; onPhoto() })
+                                DropdownMenuItem(text = { Text("File") }, onClick = { menu = false; onFile() })
+                            }
+                        }
+                        IconButton(onClick = { onExpanded(!expanded) }) {
+                            Icon(
+                                if (expanded) Glyphs.Collapse else Glyphs.Expand,
+                                contentDescription = if (expanded) "Smaller editor" else "Bigger editor",
+                                tint = Graphite.muted,
+                            )
+                        }
+                        Spacer(Modifier.weight(1f))
+                        FilledTonalIconButton(
+                            onClick = onMic,
+                            shapes = IconButtonDefaults.shapes(),
+                            colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Graphite.highest),
+                            modifier = Modifier.size(48.dp),
+                        ) { Icon(Glyphs.Mic, contentDescription = "Dictate") }
+                        FilledIconButton(
+                            onClick = onSend,
+                            enabled = draft.isNotBlank() && online && !sending,
+                            shapes = IconButtonDefaults.shapes(),
+                            modifier = Modifier.padding(start = 8.dp).size(48.dp),
+                        ) {
+                            if (sending) LoadingIndicator(Modifier.size(22.dp)) else Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        }
+                    }
                 }
-            }
-            val recording = voice is DictationState.Recording
-            FilledTonalIconButton(
-                onClick = onMic,
-                enabled = voice != DictationState.Transcribing,
-                shapes = IconButtonDefaults.shapes(),
-                colors = if (recording) {
-                    IconButtonDefaults.filledTonalIconButtonColors(containerColor = Graphite.needsYou, contentColor = Color(0xFF2A0F0A))
-                } else {
-                    IconButtonDefaults.filledTonalIconButtonColors()
-                },
-                modifier = Modifier.padding(start = 8.dp).size(52.dp),
-            ) { Icon(if (recording) Glyphs.Stop else Glyphs.Mic, contentDescription = if (recording) "Stop dictation" else "Dictate") }
-            AnimatedVisibility(draft.isNotBlank() && voice !is DictationState.Recording) {
-                FilledIconButton(
-                    onClick = onSend,
-                    shapes = IconButtonDefaults.shapes(),
-                    modifier = Modifier.padding(start = 8.dp).size(52.dp),
-                ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send") }
             }
         }
     }
 }
 
-/** Replaces the text field while dictating: a live level meter, or a spinner while transcribing. */
+/** A take in progress: how long it is against the limit, and discard, pause or finish. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun VoicePill(label: String, level: Float?) {
+private fun RecordingBar(voice: DictationState.Recording, onPause: () -> Unit, onResume: () -> Unit, onFinish: () -> Unit, onDiscard: () -> Unit) {
+    val left = Dictation.MAX_SECONDS - voice.seconds
+    var confirm by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(start = 6.dp, end = 8.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        // A few seconds are not worth a question; a long take is.
+        IconButton(onClick = { if (voice.seconds < 10) onDiscard() else confirm = true }) {
+            Icon(Icons.Default.Close, contentDescription = "Discard recording", tint = Graphite.muted)
+        }
+        if (!voice.paused) LevelBars(voice.level)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp).semantics { liveRegion = LiveRegionMode.Polite }) {
+            Text(
+                "${clock(voice.seconds)} / ${clock(Dictation.MAX_SECONDS)}",
+                fontFamily = Mono,
+                style = MaterialTheme.typography.titleMedium,
+                color = if (left <= 60) Graphite.needsYou else Graphite.text,
+            )
+            Text(
+                when {
+                    left <= 0 -> "Limit reached"
+                    left <= 60 -> "Under a minute left, then it transcribes"
+                    voice.paused -> "Paused"
+                    else -> "Listening"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = Graphite.muted,
+            )
+        }
+        FilledTonalIconButton(
+            onClick = if (voice.paused) onResume else onPause,
+            enabled = left > 0,
+            shapes = IconButtonDefaults.shapes(),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Graphite.highest),
+            modifier = Modifier.size(48.dp),
+        ) {
+            Icon(if (voice.paused) Glyphs.Mic else Glyphs.Pause, contentDescription = if (voice.paused) "Resume recording" else "Pause recording")
+        }
+        FilledIconButton(onClick = onFinish, shapes = IconButtonDefaults.shapes(), modifier = Modifier.padding(start = 8.dp).size(48.dp)) {
+            Icon(Icons.Default.Check, contentDescription = "Finish and transcribe")
+        }
+    }
+    if (confirm) DiscardTakeDialog(voice.seconds, onDiscard) { confirm = false }
+}
+
+@Composable
+private fun LevelBars(level: Float) {
+    val bars = remember { FloatArray(5) }
+    for (i in 0 until bars.size - 1) bars[i] = bars[i + 1]
+    bars[bars.lastIndex] = (level * 9f).coerceIn(0.08f, 1f)
+    Row(Modifier.size(width = 28.dp, height = 24.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
+        bars.forEach { b -> Box(Modifier.width(3.dp).fillMaxHeight(b).background(Graphite.needsYou, CircleShape)) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun TranscribingRow(voice: DictationState.Transcribing) {
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 56.dp).background(Graphite.raised, RoundedCornerShape(28.dp)).padding(horizontal = 18.dp)
-            .semantics { liveRegion = LiveRegionMode.Polite },
+        Modifier.fillMaxWidth().heightIn(min = 68.dp).padding(horizontal = 18.dp).semantics { liveRegion = LiveRegionMode.Polite },
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (level == null) {
-            LoadingIndicator(Modifier.size(24.dp))
-        } else {
-            val bars = remember { FloatArray(5) }
-            for (i in 0 until bars.size - 1) bars[i] = bars[i + 1]
-            bars[bars.lastIndex] = (level * 9f).coerceIn(0.08f, 1f)
-            Row(Modifier.size(width = 28.dp, height = 24.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-                bars.forEach { b ->
-                    Box(Modifier.width(3.dp).fillMaxHeight(b).background(Graphite.needsYou, CircleShape))
-                }
-            }
-        }
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = Graphite.muted, modifier = Modifier.padding(start = 12.dp))
+        LoadingIndicator(Modifier.size(24.dp))
+        Text(
+            if (voice.total > 1) "Transcribing on device, part ${voice.done + 1} of ${voice.total}" else "Transcribing on device",
+            style = MaterialTheme.typography.bodyMedium,
+            color = Graphite.muted,
+            modifier = Modifier.padding(start = 12.dp),
+        )
     }
+}
+
+/** A take that did not become text. Its audio is still there, so every way out keeps or saves it first. */
+@Composable
+private fun FailedTake(voice: DictationState.Failed, onRetry: () -> Unit, onExport: () -> Unit, onDiscard: () -> Unit) {
+    var confirm by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 10.dp)) {
+        Text("Recording not transcribed", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "${voice.message} The audio (${clock(voice.seconds)}) is kept on this phone.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Graphite.muted,
+            modifier = Modifier.padding(top = 4.dp, end = 6.dp),
+        )
+        Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = onRetry) { Text("Try again") }
+            OutlinedButton(onClick = onExport) { Text("Save audio") }
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { confirm = true }) { Text("Discard", color = Graphite.needsYou) }
+        }
+    }
+    if (confirm) DiscardTakeDialog(voice.seconds, onDiscard) { confirm = false }
+}
+
+@Composable
+private fun DiscardTakeDialog(seconds: Int, onDiscard: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Discard this recording?") },
+        text = { Text("${clock(seconds)} of audio will be deleted. This cannot be undone.") },
+        confirmButton = {
+            TextButton(onClick = {
+                onDismiss()
+                onDiscard()
+            }) { Text("Discard", color = Graphite.needsYou) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Keep") } },
+    )
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)

@@ -47,7 +47,7 @@ class SshSession private constructor(
 
     override val files: RemoteFiles = SftpFiles()
 
-    /** Read-only SFTP on one lazily opened channel; JSch channels are not thread-safe, hence the lock. */
+    /** SFTP on one lazily opened channel; JSch channels are not thread-safe, hence the lock. */
     private inner class SftpFiles : RemoteFiles {
         private var channel: ChannelSftp? = null
 
@@ -82,6 +82,22 @@ class SshSession private constructor(
             sftp { it.ls(dir) }.map { (it as ChannelSftp.LsEntry).filename }.filter { it != "." && it != ".." }.sorted()
         } catch (e: SftpException) {
             if (e.id == ChannelSftp.SSH_FX_NO_SUCH_FILE) emptyList() else throw e
+        }
+
+        /**
+         * Attachments go to `/tmp/openherdr-<user>`, which the system clears on its own. The
+         * chmod fails unless this user owns the folder, so a folder planted by someone else on a
+         * shared machine is never written to.
+         */
+        override fun upload(name: String, bytes: ByteArray): String = sftp { sftp ->
+            val dir = "/tmp/openherdr-" + session.userName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            runCatching { sftp.mkdir(dir) }
+            if (sftp.lstat(dir).let { it.isLink || !it.isDir }) throw java.io.IOException("$dir is not a folder")
+            sftp.chmod(448, dir) // 0700
+            val path = "$dir/${System.currentTimeMillis()}-${name.replace(Regex("[^A-Za-z0-9._-]"), "_")}"
+            sftp.put(bytes.inputStream(), path)
+            sftp.chmod(384, path) // 0600
+            path
         }
     }
 

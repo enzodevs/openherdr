@@ -55,8 +55,14 @@ lands in the user's real session. Clean up afterwards: `herdr --session ohdev se
   id; Pi: a path). `TranscriptLocator` finds the JSONL over SFTP (Claude: `~/.claude/projects/<cwd with
   non-alphanumerics as '-'>/<id>.jsonl`; Codex: UUIDv7 id → `~/.codex/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`),
   `TranscriptTail` follows it, `ChatLog` parses each format. Fixtures are real lines with text replaced.
-- `voice/` — `Dictation`: AudioRecord 16 kHz float → sherpa-onnx `OfflineRecognizer` (`nemo_transducer`). The
-  recognizer loads while the user speaks and is released on `TRIM_MEMORY_UI_HIDDEN`.
+- `voice/` — `Dictation`: AudioRecord 16 kHz PCM16 appended to `filesDir/dictation/take.pcm` as it is recorded, so a
+  take survives a killed process; pause/resume extend the same take, capped at 10 minutes. `finish` cuts it at pauses
+  into ~30 s pieces (`AudioSegments.split`) for the sherpa-onnx `OfflineRecognizer` (`nemo_transducer`). A take that
+  fails stays on disk as `Failed` (retry, save as WAV, discard); audio is deleted only after its text was delivered.
+  The recognizer loads while the user speaks and is released on `TRIM_MEMORY_UI_HIDDEN`.
+- `data/Drafts` — one unsent prompt per `<profile id>/<pane id>` in SharedPreferences. Dictation appends to it; it is
+  cleared only after the server accepted the send. Attachments are uploaded over SFTP to `/tmp/openherdr-<user>/`
+  (0700, files 0600) and referenced in the draft by path.
 - `ui/` — Compose screens. `HomeScreen` hosts three tabs (Workspaces, Servers, Settings) under a floating `GlassTabBar`
   (Kyant Backdrop: lens + blur on API 33+, blur on 31–32, solid below). `NavViewModel` is a tiny back stack over it.
   Leaving the Workspaces tab or the app does not disconnect; only the power button or the notification does.
@@ -68,6 +74,8 @@ lands in the user's real session. Clean up afterwards: `herdr --session ohdev se
   captured lines; keep them real.
 - Events are invalidation signals followed by authoritative reads (`agent.list`, `workspace.list`, `tab.list`,
   `pane.list`), never replayed onto state. `ConnectionManager.change {}` refreshes right after the app's own changes.
+- Claude Code records a prompt typed mid-turn only as `attachment.type = "queued_command"` (`origin.kind = "human"`),
+  never as a `user` line; `ChatLog` shows those and skips `task-notification` ones.
 - `pane.agent_status_changed` needs a `pane_id`, so the subscription is reopened when the pane set changes.
 - Never add server-side components, OTA updates, telemetry or cloud services. Never weaken host key checks.
 - Key names for `pane.send_keys`: `enter esc tab shift+tab up down left right backspace ctrl+c` (no `pageup`).

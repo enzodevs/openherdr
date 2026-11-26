@@ -5,6 +5,7 @@ import android.content.Intent
 import dev.cambraia.openherdr.data.AppStore
 import dev.cambraia.openherdr.data.ConnectionManager
 import dev.cambraia.openherdr.data.DeviceKey
+import dev.cambraia.openherdr.data.Drafts
 import dev.cambraia.openherdr.data.ServerProfile
 import dev.cambraia.openherdr.ssh.SshSession
 import dev.cambraia.openherdr.voice.Dictation
@@ -18,7 +19,8 @@ class OpenHerdrApp : Application() {
     val store by lazy { AppStore(filesDir) }
     val deviceKey by lazy { DeviceKey() }
     val notifier by lazy { Notifier(this) }
-    val dictation by lazy { Dictation(this, scope) }
+    val drafts by lazy { Drafts(getSharedPreferences("drafts", MODE_PRIVATE)) }
+    val dictation by lazy { Dictation(this, scope).also { it.onText = drafts::append } }
 
     val connections by lazy {
         ConnectionManager(

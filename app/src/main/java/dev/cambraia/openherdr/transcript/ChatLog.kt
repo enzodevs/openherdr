@@ -78,6 +78,12 @@ class ChatLog(private val format: TranscriptFormat) {
 
     private fun claude(root: JsonObject) {
         if (root.bool("isSidechain") == true || root.bool("isMeta") == true || root.bool("isCompactSummary") == true) return
+        // A prompt typed while the agent was busy is recorded only as a queued command, never as a user line.
+        if (root.str("type") == "attachment") {
+            val queued = (root["attachment"] as? JsonObject)?.takeIf { it.str("type") == "queued_command" } ?: return
+            if ((queued["origin"] as? JsonObject)?.str("kind") == "human") queued.str("prompt")?.let(::userText)
+            return
+        }
         val message = root["message"] as? JsonObject ?: return
         when (root.str("type")) {
             "user" -> when (val content = message["content"]) {
@@ -108,7 +114,8 @@ class ChatLog(private val format: TranscriptFormat) {
     private fun userText(raw: String) {
         val text = raw.trim()
         if (text.isEmpty()) return
-        if (text.startsWith("<")) {
+        // Only a leading tag that is also closed marks a harness notice; a prompt that merely starts with '<' is the user's.
+        if (HARNESS_TAG.containsMatchIn(text)) {
             val command = Regex("<command-name>([^<]+)</command-name>").find(text)?.groupValues?.get(1) ?: return
             val args = Regex("<command-args>([^<]*)</command-args>").find(text)?.groupValues?.get(1).orEmpty()
             add(ChatItem.User(nextKey(), "$command $args".trim()))
@@ -201,6 +208,7 @@ class ChatLog(private val format: TranscriptFormat) {
         private const val MAX_DETAIL = 240
         private val PREFERRED = listOf("command", "cmd", "file_path", "path", "pattern", "url", "query", "description", "prompt")
         private val json = Json { ignoreUnknownKeys = true }
+        private val HARNESS_TAG = Regex("^<([a-z][a-z0-9-]*)>[\\s\\S]*</\\1>")
         private val QUESTION_TOOLS = setOf("ask_user_question", "AskUserQuestion")
 
         /** Pi sends one question at the top level; Claude sends a `questions` list. */

@@ -6,7 +6,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
@@ -125,10 +131,17 @@ fun Overflow(description: String, actions: List<MenuAction>) {
 }
 
 @Composable
-fun WorkspaceHeader(node: WorkspaceNode, modifier: Modifier = Modifier, actions: List<MenuAction>) {
+fun WorkspaceHeader(node: WorkspaceNode, modifier: Modifier = Modifier, collapsed: Boolean, onToggle: () -> Unit, actions: List<MenuAction>) {
     val tabs = node.tabs.size
     val panes = node.panes.size
-    Row(modifier.fillMaxWidth().padding(start = 4.dp, top = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+    val turn by animateFloatAsState(if (collapsed) 0f else 90f, label = "fold")
+    Row(
+        modifier.fillMaxWidth().padding(top = 12.dp).clip(RoundedCornerShape(16.dp))
+            .clickable(onClickLabel = if (collapsed) "Expand workspace" else "Collapse workspace", onClick = onToggle)
+            .padding(start = 4.dp, top = 8.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Glyphs.Chevron, contentDescription = null, tint = Graphite.muted, modifier = Modifier.padding(end = 6.dp).size(20.dp).rotate(turn))
         node.status?.let { Dot(it.hue(), 8.dp, Modifier.padding(end = 10.dp)) }
         Column(Modifier.weight(1f)) {
             Text(node.title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -143,16 +156,34 @@ fun WorkspaceHeader(node: WorkspaceNode, modifier: Modifier = Modifier, actions:
 }
 
 @Composable
-fun TabHeader(node: TabNode, modifier: Modifier = Modifier, actions: List<MenuAction>) {
-    Row(modifier.fillMaxWidth().padding(start = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+fun TabHeader(node: TabNode, modifier: Modifier = Modifier, collapsed: Boolean, onToggle: () -> Unit, actions: List<MenuAction>) {
+    val turn by animateFloatAsState(if (collapsed) 0f else 90f, label = "fold")
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .clickable(onClickLabel = if (collapsed) "Expand tab" else "Collapse tab", onClick = onToggle)
+            .padding(start = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Glyphs.Chevron, contentDescription = null, tint = Graphite.faint, modifier = Modifier.padding(end = 6.dp).size(16.dp).rotate(turn))
         Text(
             node.title.uppercase(),
             style = MaterialTheme.typography.labelMedium,
             color = Graphite.faint,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f, fill = !collapsed || node.panes.isEmpty()),
         )
+        // Folded, the header still says how much is inside and whether anything there wants attention.
+        if (collapsed && node.panes.isNotEmpty()) {
+            Text(
+                "  ·  ${plural(node.panes.size, "pane")}",
+                style = MaterialTheme.typography.labelMedium,
+                color = Graphite.faint,
+                maxLines = 1,
+            )
+            node.panes.mapNotNull { it.agent?.status }.minByOrNull { it.attentionRank }?.let { Dot(it.hue(), 6.dp, Modifier.padding(start = 10.dp)) }
+            Spacer(Modifier.weight(1f))
+        }
         Overflow("Tab ${node.title} actions", actions)
     }
 }

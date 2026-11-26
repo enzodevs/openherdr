@@ -137,6 +137,8 @@ private fun ScreenContent(
                     onDeviceKey = { nav.push(Screen.DeviceKey) },
                     onTrust = { app.connections.trust(it) },
                     onDisconnect = { app.disconnect() },
+                    listState = nav.treeScroll,
+                    collapsed = nav.collapsed,
                 )
                 Tab.Servers -> ServersTab(
                     profiles = store.profiles,
@@ -197,6 +199,9 @@ private fun ScreenContent(
             revision = snapshot.revision,
             files = { app.connections.files },
             dictation = app.dictation,
+            drafts = app.drafts,
+            draftKey = "${connection.activeProfile?.id}/${screen.paneId}",
+            online = connection is Connection.Connected,
             read = { app.connections.read(it) },
             submit = { pane, text -> app.connections.submit(pane, text) },
             sendKeys = { pane, keys -> app.connections.sendKeys(pane, keys) },
